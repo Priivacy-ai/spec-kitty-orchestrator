@@ -153,6 +153,12 @@ async def execute_and_advance(
         return
 
     # ── Review phase ──────────────────────────────────────────────────────
+    # WP is in for_review. The reviewer runs while the WP *stays* in for_review.
+    # Allowed transitions from for_review:
+    #   for_review → done          (reviewer approved)
+    #   for_review → in_progress   (reviewer rejected; via start_review)
+    # in_progress → done is NOT allowed, so start_review must NOT be called
+    # before running the review agent.
 
     review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
     review_cycle = 0
@@ -160,13 +166,6 @@ async def execute_and_advance(
 
     while not review_done:
         review_cycle += 1
-        review_ref = f"review-{wp_id}-{uuid.uuid4().hex[:8]}"
-
-        try:
-            host.start_review(feature, wp_id, review_ref=review_ref)
-        except TransitionRejectedError as exc:
-            logger.warning("WP %s: start-review rejected: %s", wp_id, exc)
-            break
 
         wp_exec.review_agent = review_agent_id
         review_log = get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}")
@@ -177,6 +176,7 @@ async def execute_and_advance(
             f"Starting review cycle {review_cycle} with '{review_agent_id}'"
         )
 
+        # Run review while WP remains in for_review
         review_result = await execute_agent(
             get_invoker(review_agent_id),
             prompt_text,
@@ -187,7 +187,8 @@ async def execute_and_advance(
         )
 
         if is_success(review_result):
-            # Review approved → done
+            # Approved: for_review → done  (this transition IS allowed)
+            review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
             try:
                 host.transition(
                     feature, wp_id, "done",
@@ -200,66 +201,67 @@ async def execute_and_advance(
             except TransitionRejectedError as exc:
                 logger.error("WP %s: done transition rejected: %s", wp_id, exc)
             break
-        else:
-            # Review rejected — extract feedback and re-implement
-            feedback = extract_review_feedback(review_result)
-            wp_exec.review_feedback = feedback
-            wp_exec.review_retries += 1
-            save_state(run_state, cfg.state_file)
 
-            if wp_exec.review_retries > agent_cfg.max_retries:
-                logger.error("WP %s: review retry limit exceeded", wp_id)
-                host.append_history(feature, wp_id, "FAILED: review retry limit exceeded")
-                try:
-                    host.transition(feature, wp_id, "blocked", note="Review cycle limit exceeded")
-                except Exception:
-                    pass
-                break
+        # Rejected — extract feedback, enforce retry limit
+        feedback = extract_review_feedback(review_result)
+        wp_exec.review_feedback = feedback
+        wp_exec.review_retries += 1
+        save_state(run_state, cfg.state_file)
 
-            host.append_history(
-                feature, wp_id,
-                f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
-            )
-
-            # Re-enter in_progress for re-implementation
+        if wp_exec.review_retries > agent_cfg.max_retries:
+            logger.error("WP %s: review retry limit exceeded", wp_id)
+            host.append_history(feature, wp_id, "FAILED: review retry limit exceeded")
             try:
-                host.transition(
-                    feature, wp_id, "in_progress",
-                    note=f"Re-implementation after review rejection (cycle {review_cycle})"
-                )
-            except TransitionRejectedError as exc:
-                logger.error("WP %s: re-implementation transition rejected: %s", wp_id, exc)
-                break
+                host.transition(feature, wp_id, "blocked", note="Review cycle limit exceeded")
+            except Exception:
+                pass
+            break
 
-            # Run re-implementation
-            reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
-            reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
-            reimpl_result = await execute_agent(
-                get_invoker(impl_agent_id),
-                reimpl_prompt,
-                workspace_path,
-                role="implementation",
-                timeout_seconds=agent_cfg.timeout_seconds,
-                log_file=reimpl_log,
+        feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
+        host.append_history(
+            feature, wp_id,
+            f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
+        )
+
+        # for_review → in_progress via start_review (the right use of start_review:
+        # triggering a re-implementation cycle after rejection)
+        try:
+            host.start_review(feature, wp_id, review_ref=feedback_ref)
+        except TransitionRejectedError as exc:
+            logger.error("WP %s: start-review (re-impl trigger) rejected: %s", wp_id, exc)
+            break
+
+        # Run re-implementation with review feedback
+        reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
+        reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
+        reimpl_result = await execute_agent(
+            get_invoker(impl_agent_id),
+            reimpl_prompt,
+            workspace_path,
+            role="implementation",
+            timeout_seconds=agent_cfg.timeout_seconds,
+            log_file=reimpl_log,
+        )
+        if not is_success(reimpl_result):
+            error_msg = truncate_error(
+                "; ".join(reimpl_result.errors) if reimpl_result.errors else "rework failed"
             )
-            if not is_success(reimpl_result):
-                error_msg = truncate_error("; ".join(reimpl_result.errors) if reimpl_result.errors else "rework failed")
-                host.append_history(feature, wp_id, f"Re-implementation failed: {error_msg}")
-                try:
-                    host.transition(feature, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
-                except Exception:
-                    pass
-                break
-
-            # Back to for_review
+            host.append_history(feature, wp_id, f"Re-implementation failed: {error_msg}")
             try:
-                host.transition(
-                    feature, wp_id, "for_review",
-                    note=f"Re-implementation complete (cycle {review_cycle})"
-                )
-            except TransitionRejectedError as exc:
-                logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
-                break
+                host.transition(feature, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
+            except Exception:
+                pass
+            break
+
+        # in_progress → for_review (back to review queue for next cycle)
+        try:
+            host.transition(
+                feature, wp_id, "for_review",
+                note=f"Re-implementation complete (cycle {review_cycle})"
+            )
+        except TransitionRejectedError as exc:
+            logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
+            break
 
     save_state(run_state, cfg.state_file)
 

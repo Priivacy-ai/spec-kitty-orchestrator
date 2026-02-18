@@ -174,9 +174,26 @@ class HostClient:
     # ── Read commands ───────────────────────────────────────────────────────
 
     def contract_version(self) -> ContractVersionData:
-        """Return the host API contract version info."""
+        """Return the host API contract version info.
+
+        Raises:
+            ContractMismatchError: If the host contract version is older than
+                the minimum version this provider requires.
+        """
         resp = self._call(["contract-version"])
-        return ContractVersionData(**resp.data)
+        data = ContractVersionData(**resp.data)
+
+        host_ver = tuple(int(x) for x in data.api_version.split("."))
+        min_ver = tuple(int(x) for x in _MIN_CONTRACT_VERSION.split("."))
+        if host_ver < min_ver:
+            raise ContractMismatchError(
+                "CONTRACT_VERSION_MISMATCH",
+                f"Host contract version {data.api_version!r} is below the minimum "
+                f"required version {_MIN_CONTRACT_VERSION!r}. "
+                "Upgrade spec-kitty on the host.",
+            )
+
+        return data
 
     def feature_state(self, feature: str) -> FeatureStateData:
         """Return full state of a feature (all WPs, lanes, deps).

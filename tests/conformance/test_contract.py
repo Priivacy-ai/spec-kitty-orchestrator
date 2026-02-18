@@ -378,30 +378,89 @@ class TestErrorCodeMapping:
 
 
 class TestBoundaryCheck:
-    """Verify no specify_cli or spec_kitty_events imports in provider code."""
+    """Verify no specify_cli or spec_kitty_events imports anywhere in provider code."""
 
     def test_no_specify_cli_imports(self) -> None:
-        """HostClient and all provider modules must not import specify_cli."""
+        """All provider modules must not import specify_cli or spec_kitty_events."""
         import ast
-        import inspect
-        import spec_kitty_orchestrator.host.client as mod
+        import spec_kitty_orchestrator
 
-        source = inspect.getsource(mod)
-        tree = ast.parse(source)
-
-        # Check for actual import statements (not docstring mentions)
+        src_root = Path(spec_kitty_orchestrator.__file__).parent
         banned_prefixes = ("specify_cli", "spec_kitty_events")
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    for prefix in banned_prefixes:
-                        assert not alias.name.startswith(prefix), (
-                            f"host/client.py must not import {prefix!r} (found: {alias.name!r})"
-                        )
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    for prefix in banned_prefixes:
-                        assert not node.module.startswith(prefix), (
-                            f"host/client.py must not import from {prefix!r} "
-                            f"(found: from {node.module!r} import ...)"
-                        )
+
+        violations: list[str] = []
+        for py_file in sorted(src_root.rglob("*.py")):
+            source = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            rel = py_file.relative_to(src_root.parent)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        for prefix in banned_prefixes:
+                            if alias.name.startswith(prefix):
+                                violations.append(
+                                    f"{rel}: imports {alias.name!r}"
+                                )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        for prefix in banned_prefixes:
+                            if node.module.startswith(prefix):
+                                violations.append(
+                                    f"{rel}: imports from {node.module!r}"
+                                )
+
+        assert not violations, (
+            "Provider modules must not import host-internal packages:\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
+
+# ── Contract version enforcement ──────────────────────────────────────────────
+
+
+class TestContractVersionEnforcement:
+    """HostClient.contract_version() must raise ContractMismatchError when
+    the host version is below _MIN_CONTRACT_VERSION."""
+
+    def test_older_host_version_raises(self) -> None:
+        """If host reports an older version, provider must refuse to proceed."""
+        client = _make_client()
+        fixture = _load_fixture("contract_version_success")
+
+        # Simulate host returning an older version than _MIN_CONTRACT_VERSION
+        old_version_fixture = dict(fixture)
+        old_version_fixture["data"] = dict(fixture["data"])
+        old_version_fixture["data"]["api_version"] = "0.9.0"  # below 1.0.0
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**old_version_fixture)):
+            with pytest.raises(ContractMismatchError) as exc_info:
+                client.contract_version()
+
+        assert exc_info.value.error_code == "CONTRACT_VERSION_MISMATCH"
+        assert "0.9.0" in str(exc_info.value)
+
+    def test_matching_host_version_succeeds(self) -> None:
+        """If host reports the exact minimum version, no error is raised."""
+        client = _make_client()
+        with _patch_call(client, "contract_version_success"):
+            result = client.contract_version()
+        assert result.api_version == "1.0.0"
+
+    def test_newer_host_version_succeeds(self) -> None:
+        """If host reports a newer version (same major), no error is raised."""
+        client = _make_client()
+        fixture = _load_fixture("contract_version_success")
+
+        newer_fixture = dict(fixture)
+        newer_fixture["data"] = dict(fixture["data"])
+        newer_fixture["data"]["api_version"] = "1.2.0"
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(client, "_call", return_value=HostResponse(**newer_fixture)):
+            result = client.contract_version()
+
+        assert result.api_version == "1.2.0"

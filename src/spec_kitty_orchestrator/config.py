@@ -1,7 +1,9 @@
-"""Orchestrator configuration loaded from YAML or CLI flags.
+"""Orchestrator configuration loaded from TOML or CLI flags.
 
-Reads from `.kittify/orchestrator.yaml` (if present) and can be overridden
+Reads from `.kittify/orchestrator.toml` (if present) and can be overridden
 by CLI flags. Uses only stdlib + pydantic; no host-internal packages.
+
+Requires Python 3.11+ (tomllib is stdlib) or 'tomli' installed for Python 3.10.
 """
 
 from __future__ import annotations
@@ -114,7 +116,7 @@ class OrchestratorConfig:
 def load_config(repo_root: Path, actor: str, **overrides: Any) -> OrchestratorConfig:
     """Load OrchestratorConfig, applying any CLI overrides.
 
-    Tries to read `.kittify/orchestrator.yaml` for defaults.
+    Tries to read `.kittify/orchestrator.toml` for defaults.
     All values can be overridden via kwargs.
 
     Args:
@@ -124,22 +126,35 @@ def load_config(repo_root: Path, actor: str, **overrides: Any) -> OrchestratorCo
 
     Returns:
         Fully resolved OrchestratorConfig.
+
+    Raises:
+        RuntimeError: If orchestrator.toml exists but cannot be parsed,
+            or if no TOML parser is available on Python <3.11.
     """
-    yaml_path = repo_root / ".kittify" / "orchestrator.yaml"
-    yaml_data: dict[str, Any] = {}
+    toml_path = repo_root / ".kittify" / "orchestrator.toml"
+    toml_data: dict[str, Any] = {}
 
-    if yaml_path.exists():
+    if toml_path.exists():
         try:
-            import tomllib  # stdlib in 3.11+
-
-            with open(yaml_path, "rb") as fh:
-                yaml_data = tomllib.load(fh)
+            import tomllib  # stdlib in Python 3.11+
         except ImportError:
-            pass
-        except Exception:
-            pass
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"Cannot parse {toml_path}: Python 3.11+ required for tomllib, "
+                    "or install 'tomli' for Python 3.10 support."
+                ) from exc
 
-    agent_cfg_data: dict[str, Any] = yaml_data.get("agents", {})
+        try:
+            with open(toml_path, "rb") as fh:
+                toml_data = tomllib.load(fh)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to parse {toml_path}: {exc}"
+            ) from exc
+
+    agent_cfg_data: dict[str, Any] = toml_data.get("agents", {})
     agent_selection = AgentSelectionConfig(
         implementation_agents=agent_cfg_data.get("implementation", ["claude-code"]),
         review_agents=agent_cfg_data.get("review", ["claude-code"]),
@@ -152,7 +167,7 @@ def load_config(repo_root: Path, actor: str, **overrides: Any) -> OrchestratorCo
         repo_root=repo_root,
         actor=actor,
         max_concurrent_wps=int(
-            overrides.get("max_concurrent_wps", yaml_data.get("max_concurrent_wps", 4))
+            overrides.get("max_concurrent_wps", toml_data.get("max_concurrent_wps", 4))
         ),
         agent_selection=agent_selection,
     )
