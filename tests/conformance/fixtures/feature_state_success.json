@@ -1,0 +1,31 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.feature-state",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": true,
+  "error_code": null,
+  "data": {
+    "feature_slug": "099-test-feature",
+    "summary": {
+      "total": 2,
+      "planned": 1,
+      "in_progress": 1,
+      "done": 0
+    },
+    "work_packages": [
+      {
+        "wp_id": "WP01",
+        "lane": "in_progress",
+        "dependencies": [],
+        "last_actor": "claude-code"
+      },
+      {
+        "wp_id": "WP02",
+        "lane": "planned",
+        "dependencies": ["WP01"],
+        "last_actor": null
+      }
+    ]
+  }
+}

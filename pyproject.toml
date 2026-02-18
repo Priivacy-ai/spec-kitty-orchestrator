@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spec-kitty-orchestrator"
+version = "0.1.0"
+description = "External orchestrator for spec-kitty, integrating via the orchestrator-api contract"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9",
+    "rich>=13",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.12",
+]
+
+[project.scripts]
+spec-kitty-orchestrator = "spec_kitty_orchestrator.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spec_kitty_orchestrator"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

@@ -1,0 +1,11 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.transition",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": false,
+  "error_code": "TRANSITION_REJECTED",
+  "data": {
+    "message": "WP WP01 is in 'planned', cannot transition to 'done'"
+  }
+}

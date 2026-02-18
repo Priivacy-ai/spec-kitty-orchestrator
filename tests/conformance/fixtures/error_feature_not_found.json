@@ -1,0 +1,11 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.feature-state",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": false,
+  "error_code": "FEATURE_NOT_FOUND",
+  "data": {
+    "message": "Feature 'nonexistent-feature' not found in kitty-specs/"
+  }
+}

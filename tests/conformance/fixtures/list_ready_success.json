@@ -1,0 +1,19 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.list-ready",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": true,
+  "error_code": null,
+  "data": {
+    "feature_slug": "099-test-feature",
+    "ready_work_packages": [
+      {
+        "wp_id": "WP01",
+        "lane": "planned",
+        "dependencies_satisfied": true,
+        "recommended_base": null
+      }
+    ]
+  }
+}

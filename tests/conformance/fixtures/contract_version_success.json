@@ -1,0 +1,12 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.contract-version",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": true,
+  "error_code": null,
+  "data": {
+    "api_version": "1.0.0",
+    "min_supported_provider_version": "0.1.0"
+  }
+}
