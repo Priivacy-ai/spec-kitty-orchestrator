@@ -188,3 +188,13 @@ This is intentional and correct - it ensures a single source of truth for projec
 - 🧠 **Context**: Read what you need; don’t forget what you already learned.  
 - ✅ **Quality**: Follow secure, tested, documented practices.  
 - 📝 **Git**: Commit cleanly with clear messages.
+
+## 7. Branching and Pinning Policy
+
+- This repository uses a single long-lived branch: `main`.
+- `2.x` is retired for this repository and must not be recreated.
+- All feature and fix branches must branch from `main` and merge back into `main`.
+- Do not open pull requests targeting `2.x`.
+- Pin cross-repo dependencies and references to immutable commit SHAs or release tags.
+- Do not pin release or production workflows to moving branch names.
+- Keep any local branch or ref overrides uncommitted.

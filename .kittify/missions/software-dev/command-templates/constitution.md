@@ -430,3 +430,13 @@ After writing, provide:
 - Keep responses concise and user-focused.
 - Ensure the constitution stays lean (1-3 pages, not 10 pages).
 - If user chooses to skip entirely, still create the minimal placeholder file and exit successfully.
+
+## Branching and Pinning Governance (2026-03-07)
+
+- This repository uses a single long-lived branch: `main`.
+- `2.x` is retired for this repository and must not be recreated.
+- All implementation branches start from `main` and merge back to `main`.
+- Do not open pull requests targeting `2.x`.
+- Pin dependencies and cross-repo references to immutable commit SHAs or release tags.
+- Never use moving branch refs as release or production pins.
+- Keep temporary local pin or branch overrides uncommitted.
