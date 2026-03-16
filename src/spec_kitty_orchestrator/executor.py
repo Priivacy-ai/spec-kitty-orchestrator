@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -68,19 +71,49 @@ async def spawn_agent(
     Raises:
         ProcessSpawnError: If the process cannot be spawned.
     """
+    if not working_dir.exists():
+        raise ProcessSpawnError(f"Working directory does not exist: {working_dir}")
+
     cmd = invoker.build_command(prompt, working_dir, role)
-    logger.info("Spawning %s: %s ...", invoker.agent_id, " ".join(cmd[:3]))
+    executable = cmd[0]
+    args = cmd[1:]
+    resolved = shutil.which(executable) or executable
+
+    # OS-specific launcher handling
+    use_shell = False
+    spawn_cmd = [resolved] + list(args)
+
+    if os.name == "nt":
+        if resolved.lower().endswith((".cmd", ".bat")):
+            # Windows batch shims require a shell for reliable execution.
+            # We use shell for the launcher but keep the prompt in stdin.
+            use_shell = True
+            shell_cmd = f'"{resolved}" {subprocess.list2cmdline(args)}'
+            logger.info("Spawning %s via shell: %s", invoker.agent_id, shell_cmd)
+        else:
+            logger.info("Spawning %s: %s ...", invoker.agent_id, " ".join(spawn_cmd[:3]))
+    else:
+        logger.info("Spawning %s: %s ...", invoker.agent_id, " ".join(spawn_cmd[:3]))
 
     try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=working_dir,
-        )
+        if use_shell:
+            process = await asyncio.create_subprocess_shell(
+                shell_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+            )
+        else:
+            process = await asyncio.create_subprocess_exec(
+                *spawn_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+            )
         logger.debug("Process %s spawned for %s", process.pid, invoker.agent_id)
-        return process, cmd
+        return process, spawn_cmd
     except OSError as exc:
         raise ProcessSpawnError(
             f"Failed to spawn {invoker.agent_id}: {exc}"
