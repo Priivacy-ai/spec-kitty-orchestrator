@@ -63,7 +63,7 @@ The orchestrator will:
 1. List all WPs with satisfied dependencies
 2. Claim each ready WP via the host API
 3. Spawn the implementation agent in the WP's worktree
-4. Submit to review when implementation completes
+4. Reconcile prompt-declared subtasks, then submit to review through the task workflow CLI
 5. Transition to `done` on review approval, or re-implement with feedback on rejection
 6. Accept the feature when all WPs are done
 
@@ -206,9 +206,23 @@ The orchestrator writes only to `.kittify/orchestrator-run-state.json` (a file i
 - Retry counts per WP per role
 - Which agents were tried (for fallback)
 - Log file paths
+- Per-role heartbeat timestamps while a process is still running
 - Review feedback from rejected cycles
 
 Lane/status fields are never stored locally — those are always read from the host.
+
+---
+
+## Reliability Notes
+
+Implementation completion now uses the task workflow contract, not only raw lane transitions:
+
+- prompt frontmatter `subtasks:` are reconciled through `spec-kitty agent tasks mark-status`
+- review handoff uses `spec-kitty agent tasks move-task --to for_review`
+
+This prevents a WP from appearing complete in code while still being blocked by unchecked task checklist state.
+
+Execution logs are also now live-streamed. The provider log file is created as soon as the agent process starts, records the PID and running status, and appends stdout/stderr incrementally so long-running Gemini or Claude runs no longer look silent by default.
 
 ---
 

@@ -76,6 +76,10 @@ class PreflightFailedError(HostError):
     """Raised when merge-feature preflight checks fail."""
 
 
+class TaskWorkflowError(HostError):
+    """Raised when a `spec-kitty agent tasks` command fails."""
+
+
 _ERROR_CODE_MAP: dict[str, type[HostError]] = {
     "CONTRACT_VERSION_MISMATCH": ContractMismatchError,
     "FEATURE_NOT_FOUND": FeatureNotFoundError,
@@ -86,6 +90,7 @@ _ERROR_CODE_MAP: dict[str, type[HostError]] = {
     "POLICY_VALIDATION_FAILED": PolicyValidationError,
     "FEATURE_NOT_READY": FeatureNotReadyError,
     "PREFLIGHT_FAILED": PreflightFailedError,
+    "TASK_WORKFLOW_ERROR": TaskWorkflowError,
 }
 
 
@@ -170,6 +175,80 @@ class HostClient:
             raise exc_class(error_code, message, response.data)
 
         return response
+
+    def _call_agent_tasks_json(self, args: list[str]) -> dict[str, Any]:
+        """Invoke `spec-kitty agent tasks ... --json` and parse its JSON output."""
+        cmd = [self._bin, "agent", "tasks"] + args + ["--json"]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=self.repo_root,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"spec-kitty binary not found at '{self._bin}'. "
+                "Is spec-kitty installed and on PATH?"
+            ) from exc
+
+        raw_output = result.stdout.strip()
+        if not raw_output:
+            raise RuntimeError(
+                f"spec-kitty agent tasks returned no output.\n"
+                f"Exit code: {result.returncode}\nstderr: {result.stderr[:500]}"
+            )
+
+        payload: dict[str, Any] | None = None
+        parsed_objects: list[dict[str, Any]] = []
+        json_error: Exception | None = None
+
+        for line in [ln.strip() for ln in raw_output.splitlines() if ln.strip()]:
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError as exc:
+                json_error = exc
+                continue
+            if isinstance(candidate, dict):
+                parsed_objects.append(candidate)
+
+        if parsed_objects:
+            if result.returncode != 0:
+                for candidate in parsed_objects:
+                    error_value = candidate.get("error")
+                    if isinstance(error_value, str) and error_value.strip() and error_value.strip() not in {"0", "1"}:
+                        payload = candidate
+                        break
+            if payload is None:
+                payload = parsed_objects[-1]
+
+        if payload is None:
+            raise RuntimeError(
+                f"spec-kitty agent tasks returned non-JSON output:\n{raw_output[:500]}"
+            ) from json_error
+
+        if result.returncode != 0 or payload.get("error"):
+            message = payload.get("error", "Task workflow command failed")
+            error_data = payload if isinstance(payload, dict) else None
+            if args and args[0] == "move-task":
+                raise TransitionRejectedError(
+                    "TRANSITION_REJECTED",
+                    message,
+                    error_data,
+                )
+            raise TaskWorkflowError(
+                "TASK_WORKFLOW_ERROR",
+                message,
+                error_data,
+            )
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"spec-kitty agent tasks returned unexpected payload type: {type(payload)!r}"
+            )
+
+        return payload
 
     # ── Read commands ───────────────────────────────────────────────────────
 
@@ -296,6 +375,44 @@ class HostClient:
             args += ["--review-ref", review_ref]
         resp = self._call(args)
         return TransitionData(**resp.data)
+
+    def move_task_for_review(
+        self,
+        feature: str,
+        wp: str,
+        agent: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote a WP to `for_review` via the task workflow CLI."""
+        args = [
+            "move-task",
+            wp,
+            "--feature", feature,
+            "--to", "for_review",
+            "--agent", agent,
+        ]
+        if note:
+            args += ["--note", note]
+        return self._call_agent_tasks_json(args)
+
+    def mark_task_status(
+        self,
+        feature: str,
+        task_ids: list[str],
+        status: str,
+    ) -> dict[str, Any]:
+        """Update one or more subtask checkbox states in tasks.md."""
+        if not task_ids:
+            return {"result": "noop", "updated": []}
+        args = [
+            "mark-status",
+            *task_ids,
+            "--status",
+            status,
+            "--feature",
+            feature,
+        ]
+        return self._call_agent_tasks_json(args)
 
     def append_history(
         self, feature: str, wp: str, note: str

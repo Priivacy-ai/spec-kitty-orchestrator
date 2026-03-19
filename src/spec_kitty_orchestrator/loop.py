@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .agents import get_invoker
 from .config import AgentSelectionConfig, OrchestratorConfig
 from .executor import TIMEOUT_EXIT_CODE, execute_agent, get_log_path
-from .host.client import HostClient, TransitionRejectedError, WPAlreadyClaimedError
+from .host.client import HostClient, TaskWorkflowError, TransitionRejectedError, WPAlreadyClaimedError
 from .monitor import (
     classify_failure,
     extract_review_feedback,
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 LOOP_POLL_INTERVAL = 2.0  # seconds between list-ready polls
 DEADLOCK_THRESHOLD = 3  # consecutive empty-ready polls before declaring deadlock
+EXECUTION_HEARTBEAT_SECONDS = 5.0
 
 
 class OrchestrationError(Exception):
@@ -39,6 +41,105 @@ class OrchestrationError(Exception):
 
 class DeadlockError(OrchestrationError):
     """Raised when the loop detects a dependency deadlock."""
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_prompt_subtasks(prompt_text: str) -> list[str]:
+    """Parse WP frontmatter and return declared subtasks."""
+    lines = prompt_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+
+    subtasks: list[str] = []
+    in_subtasks = False
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if not in_subtasks and stripped == "subtasks:":
+            in_subtasks = True
+            continue
+        if in_subtasks:
+            if stripped.startswith("- "):
+                task_id = stripped[2:].strip()
+                if task_id:
+                    subtasks.append(task_id)
+                continue
+            if stripped and not line.startswith((" ", "\t", "-")):
+                in_subtasks = False
+    return subtasks
+
+
+async def _execute_with_heartbeat(
+    *,
+    invoker,
+    prompt_text: str,
+    workspace_path: Path,
+    role: str,
+    timeout_seconds: int,
+    log_file: Path,
+    wp_exec: WPExecution,
+    run_state: RunState,
+    cfg: OrchestratorConfig,
+):
+    """Run an agent while updating provider-local heartbeat state."""
+    started_at_field = f"{role}_started_at"
+    completed_at_field = f"{role}_completed_at"
+    heartbeat_field = f"{role}_heartbeat_at"
+
+    now = _now_utc()
+    if getattr(wp_exec, started_at_field) is None:
+        setattr(wp_exec, started_at_field, now)
+    setattr(wp_exec, heartbeat_field, now)
+    save_state(run_state, cfg.state_file)
+
+    task = asyncio.create_task(
+        execute_agent(
+            invoker,
+            prompt_text,
+            workspace_path,
+            role=role,
+            timeout_seconds=timeout_seconds,
+            log_file=log_file,
+        )
+    )
+
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=EXECUTION_HEARTBEAT_SECONDS)
+        except asyncio.TimeoutError:
+            setattr(wp_exec, heartbeat_field, _now_utc())
+            save_state(run_state, cfg.state_file)
+
+    result = await task
+    now = _now_utc()
+    setattr(wp_exec, completed_at_field, now)
+    setattr(wp_exec, heartbeat_field, now)
+    save_state(run_state, cfg.state_file)
+    return result
+
+
+def _reconcile_wp_subtasks(
+    host: HostClient,
+    feature: str,
+    wp_id: str,
+    prompt_text: str,
+) -> list[str]:
+    """Mark prompt-declared subtasks done after a successful implementation."""
+    subtasks = _extract_prompt_subtasks(prompt_text)
+    if not subtasks:
+        return []
+
+    host.mark_task_status(feature, subtasks, "done")
+    host.append_history(
+        feature,
+        wp_id,
+        f"Reconciled subtasks as done after successful implementation: {', '.join(subtasks)}",
+    )
+    return subtasks
 
 
 async def execute_and_advance(
@@ -96,11 +197,16 @@ async def execute_and_advance(
             f"Starting implementation with agent '{impl_agent_id}' (retry #{wp_exec.implementation_retries})"
         )
 
-        result = await execute_agent(
-            invoker, prompt_text, workspace_path,
+        result = await _execute_with_heartbeat(
+            invoker=invoker,
+            prompt_text=prompt_text,
+            workspace_path=workspace_path,
             role="implementation",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=log_file,
+            wp_exec=wp_exec,
+            run_state=run_state,
+            cfg=cfg,
         )
 
         if is_success(result):
@@ -143,11 +249,19 @@ async def execute_and_advance(
             save_state(run_state, cfg.state_file)
             return
 
-    # Transition to for_review
+    # Transition to for_review via the task workflow handoff so WP checklist
+    # readiness is validated before review starts.
     try:
-        host.transition(feature, wp_id, "for_review", note=f"Implementation by '{impl_agent_id}' complete")
-    except TransitionRejectedError as exc:
+        _reconcile_wp_subtasks(host, feature, wp_id, prompt_text)
+        host.move_task_for_review(
+            feature,
+            wp_id,
+            impl_agent_id,
+            note=f"Implementation by '{impl_agent_id}' complete",
+        )
+    except (TransitionRejectedError, TaskWorkflowError) as exc:
         logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
+        host.append_history(feature, wp_id, f"FAILED: implementation handoff rejected: {truncate_error(str(exc))}")
         _mark_failed(wp_exec, str(exc))
         save_state(run_state, cfg.state_file)
         return
@@ -177,13 +291,16 @@ async def execute_and_advance(
         )
 
         # Run review while WP remains in for_review
-        review_result = await execute_agent(
-            get_invoker(review_agent_id),
-            prompt_text,
-            workspace_path,
+        review_result = await _execute_with_heartbeat(
+            invoker=get_invoker(review_agent_id),
+            prompt_text=prompt_text,
+            workspace_path=workspace_path,
             role="review",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=review_log,
+            wp_exec=wp_exec,
+            run_state=run_state,
+            cfg=cfg,
         )
 
         if is_success(review_result):
@@ -234,13 +351,16 @@ async def execute_and_advance(
         # Run re-implementation with review feedback
         reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
         reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
-        reimpl_result = await execute_agent(
-            get_invoker(impl_agent_id),
-            reimpl_prompt,
-            workspace_path,
+        reimpl_result = await _execute_with_heartbeat(
+            invoker=get_invoker(impl_agent_id),
+            prompt_text=reimpl_prompt,
+            workspace_path=workspace_path,
             role="implementation",
             timeout_seconds=agent_cfg.timeout_seconds,
             log_file=reimpl_log,
+            wp_exec=wp_exec,
+            run_state=run_state,
+            cfg=cfg,
         )
         if not is_success(reimpl_result):
             error_msg = truncate_error(
@@ -255,11 +375,14 @@ async def execute_and_advance(
 
         # in_progress → for_review (back to review queue for next cycle)
         try:
-            host.transition(
-                feature, wp_id, "for_review",
-                note=f"Re-implementation complete (cycle {review_cycle})"
+            _reconcile_wp_subtasks(host, feature, wp_id, prompt_text)
+            host.move_task_for_review(
+                feature,
+                wp_id,
+                impl_agent_id,
+                note=f"Re-implementation complete (cycle {review_cycle})",
             )
-        except TransitionRejectedError as exc:
+        except (TransitionRejectedError, TaskWorkflowError) as exc:
             logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
             break
 

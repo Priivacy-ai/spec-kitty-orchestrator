@@ -34,10 +34,12 @@ class WPExecution:
     implementation_retries: int = 0
     implementation_started_at: str | None = None
     implementation_completed_at: str | None = None
+    implementation_heartbeat_at: str | None = None
     review_agent: str | None = None
     review_retries: int = 0
     review_started_at: str | None = None
     review_completed_at: str | None = None
+    review_heartbeat_at: str | None = None
     review_feedback: str | None = None
     log_file: str | None = None
     fallback_agents_tried: list[str] = field(default_factory=list)

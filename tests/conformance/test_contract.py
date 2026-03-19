@@ -20,6 +20,7 @@ from spec_kitty_orchestrator.host.client import (
     FeatureNotFoundError,
     HostClient,
     HostError,
+    TaskWorkflowError,
     TransitionRejectedError,
     PolicyValidationError,
 )
@@ -286,6 +287,26 @@ class TestTransition:
                 client.transition("099-test-feature", "WP01", "done")
         assert exc_info.value.error_code == "TRANSITION_REJECTED"
 
+    def test_mark_task_status_uses_feature_and_bulk_task_ids(self) -> None:
+        client = _make_client()
+        with patch.object(
+            client,
+            "_call_agent_tasks_json",
+            return_value={"result": "success", "updated": ["T006", "T007"], "status": "done"},
+        ) as mock_call:
+            result = client.mark_task_status("004-aegis-live-runtime-mvp", ["T006", "T007"], "done")
+
+        assert result["status"] == "done"
+        mock_call.assert_called_once_with([
+            "mark-status",
+            "T006",
+            "T007",
+            "--status",
+            "done",
+            "--feature",
+            "004-aegis-live-runtime-mvp",
+        ])
+
 
 # ── append-history ────────────────────────────────────────────────────────────
 
@@ -364,6 +385,7 @@ class TestErrorCodeMapping:
         ("TRANSITION_REJECTED", TransitionRejectedError),
         ("FEATURE_NOT_FOUND", FeatureNotFoundError),
         ("CONTRACT_VERSION_MISMATCH", ContractMismatchError),
+        ("TASK_WORKFLOW_ERROR", TaskWorkflowError),
     ])
     def test_error_code_maps_to_exception(
         self, error_code: str, expected_cls: type
