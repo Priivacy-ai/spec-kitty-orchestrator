@@ -170,3 +170,74 @@ async def test_execute_agent_terminates_early_on_gemini_capacity_error(tmp_path:
     assert any("rate limit" in err.lower() for err in result.errors)
     log_text = log_file.read_text(encoding="utf-8")
     assert "early_termination" in log_text
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_handles_stdin_connection_reset(tmp_path: Path) -> None:
+    class _FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = list(chunks)
+
+        async def read(self, n: int = -1) -> bytes:
+            if self._chunks:
+                await asyncio.sleep(0)
+                return self._chunks.pop(0)
+            return b""
+
+    class _ResettingStdin:
+        def write(self, data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.pid = 5252
+            self.stdin = _ResettingStdin()
+            self.stdout = _FakeStream([])
+            self.stderr = _FakeStream([b"terminated before prompt\n"])
+            self.returncode = 124
+
+        async def wait(self) -> int:
+            await asyncio.sleep(0)
+            return self.returncode
+
+    invoker = MagicMock()
+    invoker.uses_stdin = True
+    invoker.agent_id = "gemini"
+    invoker.detect_runtime_termination.return_value = None
+    invoker.parse_output.return_value = InvocationResult(
+        success=False,
+        exit_code=124,
+        stdout="",
+        stderr="terminated before prompt\n",
+        duration_seconds=0.01,
+        errors=["terminated before prompt"],
+    )
+
+    process = _FakeProcess()
+    log_file = tmp_path / "reset.log"
+
+    with patch(
+        "spec_kitty_orchestrator.executor.spawn_agent",
+        new=AsyncMock(return_value=(process, ["gemini", "--json"])),
+    ):
+        result = await execute_agent(
+            invoker,
+            "prompt text",
+            tmp_path,
+            "review",
+            timeout_seconds=5,
+            log_file=log_file,
+        )
+
+    assert result is invoker.parse_output.return_value
+    assert log_file.exists()
+    assert "exit_code: 124" in log_file.read_text(encoding="utf-8")

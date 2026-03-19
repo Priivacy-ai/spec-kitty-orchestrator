@@ -198,12 +198,27 @@ async def execute_agent(
     early_exit_reason: str | None = None
     try:
         if stdin_data is not None and process.stdin is not None:
-            process.stdin.write(stdin_data)
-            await process.stdin.drain()
-            process.stdin.close()
-            wait_closed = getattr(process.stdin, "wait_closed", None)
-            if callable(wait_closed):
-                await wait_closed()
+            try:
+                process.stdin.write(stdin_data)
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                logger.warning(
+                    "Process %s for %s closed stdin before prompt was fully sent: %s",
+                    process.pid,
+                    invoker.agent_id,
+                    exc,
+                )
+            finally:
+                try:
+                    process.stdin.close()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                wait_closed = getattr(process.stdin, "wait_closed", None)
+                if callable(wait_closed):
+                    try:
+                        await wait_closed()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
 
         stdout_task = asyncio.create_task(
             _pump_stream(process.stdout, "stdout", stdout_bytes, log_handle, write_lock)
