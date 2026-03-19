@@ -108,7 +108,7 @@ Shows the provider-local run state (retry counts, agent choices, errors) from th
 
 ### `resume`
 
-Resumes an interrupted run from saved state. The host already tracks lane state, and the loop now re-enters orphaned WPs already sitting in `in_progress` or `for_review` instead of only waiting for newly ready `planned` work.
+Resumes an interrupted run from saved state. The host already tracks lane state, and the loop now re-enters orphaned WPs already sitting in `in_progress` or `for_review` instead of only waiting for newly ready `planned` work. Fatal provider-side review failures such as Gemini `429` capacity exhaustion are also classified early so the resumed loop can retry or fall back cleanly instead of sitting behind a wedged reviewer process.
 
 ### `abort`
 

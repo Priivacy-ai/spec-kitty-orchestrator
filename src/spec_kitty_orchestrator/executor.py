@@ -193,6 +193,9 @@ async def execute_agent(
 
     stdout_bytes = bytearray()
     stderr_bytes = bytearray()
+    exit_code = TIMEOUT_EXIT_CODE
+    early_exit_code: int | None = None
+    early_exit_reason: str | None = None
     try:
         if stdin_data is not None and process.stdin is not None:
             process.stdin.write(stdin_data)
@@ -209,27 +212,63 @@ async def execute_agent(
             _pump_stream(process.stderr, "stderr", stderr_bytes, log_handle, write_lock)
         )
 
-        try:
-            await asyncio.wait_for(process.wait(), timeout=float(timeout_seconds))
-            exit_code = process.returncode or 0
-        except asyncio.TimeoutError:
-            logger.warning("Process %s timed out after %ss", process.pid, timeout_seconds)
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=TERMINATION_GRACE_SECONDS)
-            except (asyncio.TimeoutError, ProcessLookupError):
+        wait_task = asyncio.create_task(process.wait())
+        deadline = start + float(timeout_seconds)
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Process %s timed out after %ss", process.pid, timeout_seconds)
                 try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-            exit_code = TIMEOUT_EXIT_CODE
+                    process.terminate()
+                    await asyncio.wait_for(wait_task, timeout=TERMINATION_GRACE_SECONDS)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await wait_task
+                exit_code = TIMEOUT_EXIT_CODE
+                break
+
+            detection = invoker.detect_runtime_termination(
+                stdout_bytes.decode("utf-8", errors="replace"),
+                stderr_bytes.decode("utf-8", errors="replace"),
+            )
+            if detection is not None:
+                early_exit_code, early_exit_reason = detection
+                logger.warning(
+                    "Process %s for %s terminated early: %s",
+                    process.pid,
+                    invoker.agent_id,
+                    early_exit_reason,
+                )
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(wait_task, timeout=TERMINATION_GRACE_SECONDS)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await wait_task
+                exit_code = early_exit_code
+                break
+
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=min(0.5, remaining))
+                exit_code = process.returncode or 0
+                break
+            except asyncio.TimeoutError:
+                continue
 
         await asyncio.gather(stdout_task, stderr_task)
     finally:
         if log_handle is not None:
             try:
                 async with write_lock:
+                    if early_exit_reason:
+                        log_handle.write(f"\n=== early_termination: {early_exit_reason} ===\n")
                     log_handle.write(f"\n=== exit_code: {exit_code} ===\n")
                     log_handle.flush()
             except OSError:

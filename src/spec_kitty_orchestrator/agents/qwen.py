@@ -42,3 +42,16 @@ class QwenInvoker(BaseInvoker):
             errors=self._extract_errors_from_output(data, stderr),
             warnings=self._extract_warnings_from_output(data, stderr),
         )
+
+    def detect_runtime_termination(
+        self,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[int, str] | None:
+        """Qwen CLI follows Gemini stderr patterns for provider failures."""
+        stderr_lower = stderr.lower()
+        if any(marker in stderr_lower for marker in ("resource_exhausted", "ratelimitexceeded", "no capacity available for model")):
+            return (42, "Qwen provider rate limit/capacity exhaustion detected from stderr")
+        if any(marker in stderr_lower for marker in ("authentication failed", "invalid_grant", "unauthorized")):
+            return (41, "Qwen authentication failure detected from stderr")
+        return None

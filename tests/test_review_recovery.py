@@ -121,6 +121,7 @@ class _RecoveryHost:
         self.lane = lane
         self.transitions: list[tuple[str, str, str | None, str | None]] = []
         self.history: list[str] = []
+        self.start_review_calls = 0
 
     def list_ready(self, feature: str) -> SimpleNamespace:
         return SimpleNamespace(feature_slug=feature, ready_work_packages=[])
@@ -154,7 +155,15 @@ class _RecoveryHost:
         )
 
     def start_review(self, feature: str, wp: str, review_ref: str) -> SimpleNamespace:
-        raise AssertionError("start_review should not be needed for the happy-path recovery test")
+        self.start_review_calls += 1
+        self.lane = "in_progress"
+        return SimpleNamespace(
+            feature_slug=feature,
+            wp_id=wp,
+            from_lane="for_review",
+            to_lane="in_progress",
+            policy_metadata_recorded=True,
+        )
 
 
 def _make_run_state() -> RunState:
@@ -291,4 +300,46 @@ async def test_resume_picks_up_for_review_wp(tmp_path: Path) -> None:
         await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
 
     assert host.lane == "done"
+    assert host.start_review_calls == 0
     assert any(to == "done" for _, to, _, _ in host.transitions)
+
+
+@pytest.mark.asyncio
+async def test_review_runtime_failure_retries_before_approval(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write_prompt(repo_root)
+    host = _RecoveryHost(repo_root)
+    run_state = _make_run_state()
+    run_state.wp_executions["WP01"] = WPExecution(
+        wp_id="WP01",
+        implementation_agent="gemini",
+    )
+    cfg = _make_cfg(repo_root)
+    cfg.agent_selection.max_retries = 1
+
+    rate_limited = InvocationResult(
+        success=False,
+        exit_code=42,
+        stdout="",
+        stderr="No capacity available for model gemini-2.5-flash on the server",
+        duration_seconds=0.01,
+        errors=["Gemini rate limit exceeded (exit 42)"],
+    )
+    approved = InvocationResult(
+        success=True,
+        exit_code=0,
+        stdout='{"review":"approved"}\n',
+        stderr="",
+        duration_seconds=0.01,
+    )
+
+    with patch(
+        "spec_kitty_orchestrator.loop.execute_agent",
+        new=AsyncMock(side_effect=[rate_limited, approved]),
+    ), patch("spec_kitty_orchestrator.loop.get_invoker", return_value=MagicMock(agent_id="gemini")), \
+        patch("spec_kitty_orchestrator.loop.LOOP_POLL_INTERVAL", 0.0):
+        await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
+
+    assert host.lane == "done"
+    assert host.start_review_calls == 0
+    assert any("Retrying review after execution failure" in note for note in host.history)

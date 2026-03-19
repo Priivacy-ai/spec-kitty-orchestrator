@@ -18,6 +18,7 @@ from .config import AgentSelectionConfig, OrchestratorConfig
 from .executor import TIMEOUT_EXIT_CODE, execute_agent, get_log_path
 from .host.client import HostClient, TaskWorkflowError, TransitionRejectedError, WPAlreadyClaimedError
 from .monitor import (
+    FailureType,
     classify_failure,
     extract_review_feedback,
     is_success,
@@ -191,6 +192,7 @@ async def _run_review_phase(
     review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
     review_cycle = wp_exec.review_retries
     review_done = False
+    review_agents_tried: list[str] = []
 
     while not review_done:
         review_cycle += 1
@@ -230,6 +232,51 @@ async def _run_review_phase(
             except TransitionRejectedError as exc:
                 logger.error("WP %s: done transition rejected: %s", wp_id, exc)
             break
+
+        failure = classify_failure(review_result, review_agent_id)
+        if failure in {
+            FailureType.TIMEOUT,
+            FailureType.AUTH_ERROR,
+            FailureType.RATE_LIMIT,
+            FailureType.NETWORK_ERROR,
+        }:
+            error_msg = truncate_error(
+                "; ".join(review_result.errors) if review_result.errors else f"Review execution failed: {failure}"
+            )
+            wp_exec.last_error = error_msg
+            logger.warning("WP %s review execution failed (%s): %s", wp_id, failure, error_msg)
+
+            if should_retry(failure, wp_exec.review_retries, agent_cfg.max_retries):
+                wp_exec.review_retries += 1
+                save_state(run_state, cfg.state_file)
+                host.append_history(
+                    feature,
+                    wp_id,
+                    f"Retrying review after execution failure ({failure}): {error_msg}",
+                )
+                await asyncio.sleep(2.0 * wp_exec.review_retries)
+                continue
+
+            review_agents_tried.append(review_agent_id)
+            try:
+                review_agent_id = select_reviewer(agent_cfg, impl_agent_id, review_agents_tried)
+                wp_exec.review_agent = review_agent_id
+                wp_exec.review_retries = 0
+                save_state(run_state, cfg.state_file)
+                host.append_history(
+                    feature,
+                    wp_id,
+                    f"Falling back review to agent '{review_agent_id}' after execution failure ({failure})",
+                )
+                continue
+            except NoAgentAvailableError:
+                logger.error("WP %s: all review agents exhausted", wp_id)
+                host.append_history(feature, wp_id, "FAILED: all review agents exhausted")
+                try:
+                    host.transition(feature, wp_id, "blocked", note="All review agents exhausted")
+                except Exception:
+                    pass
+                break
 
         feedback = extract_review_feedback(review_result)
         wp_exec.review_feedback = feedback
@@ -431,8 +478,18 @@ async def execute_and_advance(
             note=f"Implementation by '{impl_agent_id}' complete",
         )
     except (TransitionRejectedError, TaskWorkflowError) as exc:
+        error_msg = truncate_error(str(exc))
         logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
-        host.append_history(feature, wp_id, f"FAILED: implementation handoff rejected: {truncate_error(str(exc))}")
+        host.append_history(feature, wp_id, f"FAILED: implementation handoff rejected: {error_msg}")
+        try:
+            host.transition(
+                feature,
+                wp_id,
+                "blocked",
+                note=f"Implementation handoff rejected: {error_msg}",
+            )
+        except Exception:
+            pass
         _mark_failed(wp_exec, str(exc))
         save_state(run_state, cfg.state_file)
         return

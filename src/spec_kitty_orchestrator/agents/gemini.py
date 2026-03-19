@@ -57,3 +57,33 @@ class GeminiInvoker(BaseInvoker):
             errors=errors,
             warnings=self._extract_warnings_from_output(data, stderr),
         )
+
+    def detect_runtime_termination(
+        self,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[int, str] | None:
+        """Terminate early when Gemini emits fatal provider errors to stderr."""
+        stderr_lower = stderr.lower()
+
+        auth_markers = (
+            "authentication failed",
+            "invalid_grant",
+            "unauthorized",
+            "permission denied",
+        )
+        if any(marker in stderr_lower for marker in auth_markers):
+            return (GEMINI_EXIT_AUTH_ERROR, "Gemini authentication failure detected from stderr")
+
+        rate_limit_markers = (
+            "no capacity available for model",
+            "model_capacity_exhausted",
+            "resource_exhausted",
+            "ratelimitexceeded",
+            "status: 429",
+            '"code": 429',
+        )
+        if any(marker in stderr_lower for marker in rate_limit_markers):
+            return (GEMINI_EXIT_RATE_LIMIT, "Gemini rate limit/capacity exhaustion detected from stderr")
+
+        return None

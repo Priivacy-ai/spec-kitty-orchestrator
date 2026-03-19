@@ -74,6 +74,14 @@ class AgentInvoker(Protocol):
         """Parse raw subprocess output into a structured InvocationResult."""
         ...
 
+    def detect_runtime_termination(
+        self,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[int, str] | None:
+        """Return a synthetic exit code + reason when the process should stop early."""
+        ...
+
 
 class BaseInvoker:
     """Abstract base class implementing common agent invoker helpers."""
@@ -116,6 +124,14 @@ class BaseInvoker:
             errors=self._extract_errors_from_output(data, stderr),
             warnings=self._extract_warnings_from_output(data, stderr),
         )
+
+    def detect_runtime_termination(
+        self,
+        stdout: str,
+        stderr: str,
+    ) -> tuple[int, str] | None:
+        """Default: do not terminate early based on streamed output."""
+        return None
 
     # ── JSON helpers ─────────────────────────────────────────────────────────
 
