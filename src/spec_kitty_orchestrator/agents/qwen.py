@@ -11,18 +11,19 @@ class QwenInvoker(BaseInvoker):
     """Invoker for Qwen Code CLI (qwen).
 
     Fork of Gemini CLI with identical flags.
-    Current CLI expects the prompt as the `-p/--prompt` value for headless mode.
+    Current CLI requires a non-empty `--prompt` value for headless mode and
+    appends stdin content, so we keep the real prompt on stdin.
     """
 
     agent_id = "qwen"
     command = "qwen"
-    uses_stdin = False
+    uses_stdin = True
 
     def build_command(self, prompt: str, working_dir: Path, role: str) -> list[str]:
         return [
             "qwen",
-            "-p",
-            prompt,
+            "--prompt",
+            "stdin prompt follows",
             "--yolo",
             "--output-format", "json",
         ]

@@ -16,20 +16,22 @@ GEMINI_EXIT_INTERRUPTED = 130
 class GeminiInvoker(BaseInvoker):
     """Invoker for Google Gemini CLI (gemini).
 
-    Current Gemini CLI expects the prompt as the `-p/--prompt` value for
-    headless mode.
+    Current Gemini CLI requires a non-empty `--prompt` value for headless mode,
+    but also appends any stdin content. We send a benign inline prompt marker
+    and stream the full task prompt over stdin so large prompts and YAML
+    frontmatter remain intact.
     Has specific exit codes for different error types.
     """
 
     agent_id = "gemini"
     command = "gemini"
-    uses_stdin = False
+    uses_stdin = True
 
     def build_command(self, prompt: str, working_dir: Path, role: str) -> list[str]:
         return [
             "gemini",
-            "-p",
-            prompt,
+            "--prompt",
+            "stdin prompt follows",
             "--yolo",
             "--output-format", "json",
         ]
