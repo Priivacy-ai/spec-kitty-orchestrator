@@ -1,8 +1,9 @@
 """HostClient: the only gateway between the provider and spec-kitty workflow state.
 
-Every state mutation in spec-kitty is executed by calling:
-
-    spec-kitty orchestrator-api <subcommand> [args] --json
+Host commands are executed via ``spec-kitty orchestrator-api``. Most host
+commands accept ``--json`` explicitly, but some contract-compatible builds
+emit the canonical JSON envelope by default and reject the flag. The client
+prefers ``--json`` and transparently retries without it when needed.
 
 The JSON response is parsed against the canonical envelope and validated.
 Errors are mapped to typed HostError subclasses.
@@ -33,6 +34,7 @@ from .models import (
 # The minimum contract version this provider supports
 _MIN_CONTRACT_VERSION = "1.0.0"
 _SPEC_KITTY_BIN = "spec-kitty"
+_UNSUPPORTED_JSON_FLAG = "No such option: --json"
 
 
 class HostError(Exception):
@@ -122,7 +124,7 @@ class HostClient:
     def _call(self, args: list[str]) -> HostResponse:
         """Invoke spec-kitty orchestrator-api with the given args.
 
-        Runs: spec-kitty orchestrator-api <args> --json
+        Runs: spec-kitty orchestrator-api <args> [--json]
         Parses the canonical JSON envelope.
         Raises HostError (or subclass) on success=false.
 
@@ -137,20 +139,34 @@ class HostClient:
             HostError: For any other error_code.
             RuntimeError: If subprocess fails entirely or output is not JSON.
         """
-        cmd = [self._bin, "orchestrator-api"] + args + ["--json"]
+        def _run(include_json: bool) -> subprocess.CompletedProcess[str]:
+            cmd = [self._bin, "orchestrator-api"] + args
+            if include_json:
+                cmd.append("--json")
+            try:
+                return subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=self.repo_root,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"spec-kitty binary not found at '{self._bin}'. "
+                    "Is spec-kitty installed and on PATH?"
+                ) from exc
+
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                cwd=self.repo_root,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"spec-kitty binary not found at '{self._bin}'. "
-                "Is spec-kitty installed and on PATH?"
-            ) from exc
+            result = _run(include_json=True)
+            if (
+                result.returncode != 0
+                and not result.stdout.strip()
+                and _UNSUPPORTED_JSON_FLAG in result.stderr
+            ):
+                result = _run(include_json=False)
+        except RuntimeError:
+            raise
 
         raw_output = result.stdout.strip()
         if not raw_output:
