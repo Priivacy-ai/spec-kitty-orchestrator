@@ -342,4 +342,94 @@ async def test_review_runtime_failure_retries_before_approval(tmp_path: Path) ->
 
     assert host.lane == "done"
     assert host.start_review_calls == 0
-    assert any("Retrying review after execution failure" in note for note in host.history)
+    assert any("Falling back review to agent" in note for note in host.history)
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_persisted_review_fallback_agent(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write_prompt(repo_root)
+    host = _RecoveryHost(repo_root)
+    run_state = _make_run_state()
+    run_state.wp_executions["WP01"] = WPExecution(
+        wp_id="WP01",
+        implementation_agent="gemini",
+        review_agent="gemini-2.5-flash-lite",
+        review_retries=2,
+        review_completed_at="2026-03-19T00:00:05+00:00",
+        review_fallback_agents_tried=["gemini"],
+    )
+    cfg = _make_cfg(repo_root)
+
+    review_result = InvocationResult(
+        success=True,
+        exit_code=0,
+        stdout='{"review":"approved"}\n',
+        stderr="",
+        duration_seconds=0.01,
+    )
+    requested_agents: list[str] = []
+
+    def _capture_invoker(agent_id: str) -> MagicMock:
+        requested_agents.append(agent_id)
+        return MagicMock(agent_id=agent_id)
+
+    with patch(
+        "spec_kitty_orchestrator.loop.execute_agent",
+        new=AsyncMock(return_value=review_result),
+    ), patch("spec_kitty_orchestrator.loop.get_invoker", side_effect=_capture_invoker), \
+        patch("spec_kitty_orchestrator.loop.LOOP_POLL_INTERVAL", 0.0):
+        await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
+
+    assert requested_agents[0] == "gemini-2.5-flash-lite"
+    assert host.lane == "done"
+
+
+@pytest.mark.asyncio
+async def test_resume_backfills_missing_review_fallback_history(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write_prompt(repo_root)
+    host = _RecoveryHost(repo_root)
+    run_state = _make_run_state()
+    run_state.wp_executions["WP01"] = WPExecution(
+        wp_id="WP01",
+        implementation_agent="gemini",
+        review_agent="gemini-2.5-flash-lite",
+        review_retries=2,
+    )
+    cfg = _make_cfg(repo_root)
+
+    rate_limited = InvocationResult(
+        success=False,
+        exit_code=42,
+        stdout="",
+        stderr="No capacity available for model gemini-2.5-flash-lite on the server",
+        duration_seconds=0.01,
+        errors=["Gemini rate limit exceeded (exit 42)"],
+    )
+    approved = InvocationResult(
+        success=True,
+        exit_code=0,
+        stdout='{"review":"approved"}\n',
+        stderr="",
+        duration_seconds=0.01,
+    )
+    requested_agents: list[str] = []
+
+    def _capture_invoker(agent_id: str) -> MagicMock:
+        requested_agents.append(agent_id)
+        return MagicMock(agent_id=agent_id)
+
+    with patch(
+        "spec_kitty_orchestrator.loop.execute_agent",
+        new=AsyncMock(side_effect=[rate_limited, approved]),
+    ), patch("spec_kitty_orchestrator.loop.get_invoker", side_effect=_capture_invoker), \
+        patch("spec_kitty_orchestrator.loop.LOOP_POLL_INTERVAL", 0.0):
+        await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
+
+    assert requested_agents[:2] == ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    assert run_state.wp_executions["WP01"].review_fallback_agents_tried == [
+        "gemini",
+        "gemini-2.5-flash-lite",
+    ]
+    assert host.lane == "done"

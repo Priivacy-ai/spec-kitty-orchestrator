@@ -189,10 +189,20 @@ async def _run_review_phase(
         save_state(run_state, cfg.state_file)
         return
 
-    review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
     review_cycle = wp_exec.review_retries
     review_done = False
-    review_agents_tried: list[str] = []
+    review_agents_tried = list(wp_exec.review_fallback_agents_tried)
+    if not review_agents_tried and wp_exec.review_agent:
+        review_candidates = agent_cfg.review_candidates(impl_agent_id)
+        if wp_exec.review_agent in review_candidates:
+            current_index = review_candidates.index(wp_exec.review_agent)
+            review_agents_tried = review_candidates[:current_index]
+            wp_exec.review_fallback_agents_tried = list(review_agents_tried)
+            save_state(run_state, cfg.state_file)
+    if wp_exec.review_agent:
+        review_agent_id = wp_exec.review_agent
+    else:
+        review_agent_id = select_reviewer(agent_cfg, impl_agent_id, review_agents_tried)
 
     while not review_done:
         review_cycle += 1
@@ -246,6 +256,23 @@ async def _run_review_phase(
             wp_exec.last_error = error_msg
             logger.warning("WP %s review execution failed (%s): %s", wp_id, failure, error_msg)
 
+            if failure == FailureType.RATE_LIMIT:
+                if review_agent_id not in review_agents_tried:
+                    review_agents_tried.append(review_agent_id)
+                wp_exec.review_fallback_agents_tried = list(review_agents_tried)
+                try:
+                    review_agent_id = select_reviewer(agent_cfg, impl_agent_id, review_agents_tried)
+                    wp_exec.review_agent = review_agent_id
+                    save_state(run_state, cfg.state_file)
+                    host.append_history(
+                        feature,
+                        wp_id,
+                        f"Falling back review to agent '{review_agent_id}' after rate limit",
+                    )
+                    continue
+                except NoAgentAvailableError:
+                    pass
+
             if should_retry(failure, wp_exec.review_retries, agent_cfg.max_retries):
                 wp_exec.review_retries += 1
                 save_state(run_state, cfg.state_file)
@@ -257,7 +284,9 @@ async def _run_review_phase(
                 await asyncio.sleep(2.0 * wp_exec.review_retries)
                 continue
 
-            review_agents_tried.append(review_agent_id)
+            if review_agent_id not in review_agents_tried:
+                review_agents_tried.append(review_agent_id)
+            wp_exec.review_fallback_agents_tried = list(review_agents_tried)
             try:
                 review_agent_id = select_reviewer(agent_cfg, impl_agent_id, review_agents_tried)
                 wp_exec.review_agent = review_agent_id
@@ -440,6 +469,17 @@ async def execute_and_advance(
         error_msg = truncate_error("; ".join(result.errors) if result.errors else "unknown error")
         wp_exec.last_error = error_msg
         logger.warning("WP %s impl failed (%s): %s", wp_id, failure.value, error_msg)
+
+        if failure == FailureType.RATE_LIMIT:
+            wp_exec.fallback_agents_tried.append(impl_agent_id)
+            try:
+                impl_agent_id = select_implementer(agent_cfg, wp_exec.fallback_agents_tried)
+                wp_exec.implementation_agent = impl_agent_id
+                save_state(run_state, cfg.state_file)
+                host.append_history(feature, wp_id, f"Falling back to agent '{impl_agent_id}' after rate limit")
+                continue
+            except NoAgentAvailableError:
+                pass
 
         if should_retry(failure, wp_exec.implementation_retries, agent_cfg.max_retries):
             wp_exec.implementation_retries += 1

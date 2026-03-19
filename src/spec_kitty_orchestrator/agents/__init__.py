@@ -31,6 +31,14 @@ _REGISTRY: dict[str, type[BaseInvoker]] = {
     "cursor": CursorInvoker,
 }
 
+_GEMINI_MODEL_ALIASES: dict[str, str] = {
+    "gemini": "auto",
+    "gemini-auto": "auto",
+    "gemini-2.5-flash-lite": "gemini-2.5-flash-lite",
+    "gemini-2.5-flash": "gemini-2.5-flash",
+    "gemini-3-flash-preview": "gemini-3-flash-preview",
+}
+
 
 def get_invoker(agent_id: str) -> BaseInvoker:
     """Return an invoker instance for the given agent ID.
@@ -41,6 +49,9 @@ def get_invoker(agent_id: str) -> BaseInvoker:
     Raises:
         KeyError: If agent_id is not in the registry.
     """
+    if agent_id in _GEMINI_MODEL_ALIASES:
+        return GeminiInvoker(model=_GEMINI_MODEL_ALIASES[agent_id])
+
     cls = _REGISTRY[agent_id]
     return cls()
 

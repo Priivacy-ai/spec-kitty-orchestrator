@@ -173,6 +173,79 @@ async def test_execute_agent_terminates_early_on_gemini_capacity_error(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_execute_agent_terminates_early_on_gemini_soft_capacity_message(tmp_path: Path) -> None:
+    class _FakeStream:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = list(chunks)
+
+        async def read(self, n: int = -1) -> bytes:
+            if self._chunks:
+                await asyncio.sleep(0)
+                return self._chunks.pop(0)
+            await asyncio.sleep(0)
+            return b""
+
+    class _FakeStdin:
+        def write(self, data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class _BlockingProcess:
+        def __init__(self) -> None:
+            self.pid = 778
+            self.stdin = _FakeStdin()
+            self.stdout = _FakeStream([])
+            self.stderr = _FakeStream([
+                b"Attempt 1 failed: You have exhausted your capacity on this model.\n",
+            ])
+            self.returncode = None
+            self._done = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self._done.wait()
+            return self.returncode or 0
+
+        def terminate(self) -> None:
+            self.returncode = -15
+            self._done.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self._done.set()
+
+    invoker = GeminiInvoker()
+    log_file = tmp_path / "review-soft-capacity.log"
+    process = _BlockingProcess()
+
+    with patch(
+        "spec_kitty_orchestrator.executor.spawn_agent",
+        new=AsyncMock(return_value=(process, ["gemini", "--json"])),
+    ):
+        result = await execute_agent(
+            invoker,
+            "prompt text",
+            tmp_path,
+            "review",
+            timeout_seconds=30,
+            log_file=log_file,
+        )
+
+    assert result.exit_code == GEMINI_EXIT_RATE_LIMIT
+    assert result.success is False
+    assert any("rate limit" in err.lower() for err in result.errors)
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "early_termination" in log_text
+
+
+@pytest.mark.asyncio
 async def test_execute_agent_handles_stdin_connection_reset(tmp_path: Path) -> None:
     class _FakeStream:
         def __init__(self, chunks: list[bytes]) -> None:

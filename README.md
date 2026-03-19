@@ -143,7 +143,7 @@ agents:
 | `claude-code` | `claude` | yes | Default; JSON output via `--output-format json` |
 | `codex` | `codex` | yes | `codex exec -` with `--full-auto` |
 | `copilot` | `gh` | no | Requires `gh extension install github/gh-copilot` |
-| `gemini` | `gemini` | yes | Specific exit codes for auth/rate-limit errors |
+| `gemini` | `gemini` | yes | Uses `--model auto` and falls through to lower-capacity Gemini variants on rate limit |
 | `qwen` | `qwen` | yes | Fork of Gemini CLI |
 | `opencode` | `opencode` | yes | Multi-provider; JSONL streaming output |
 | `kilocode` | `kilocode` | no | Prompt as positional arg with `-a --yolo -j` |

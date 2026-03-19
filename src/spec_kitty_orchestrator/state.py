@@ -41,6 +41,7 @@ class WPExecution:
     review_completed_at: str | None = None
     review_heartbeat_at: str | None = None
     review_feedback: str | None = None
+    review_fallback_agents_tried: list[str] = field(default_factory=list)
     log_file: str | None = None
     fallback_agents_tried: list[str] = field(default_factory=list)
     restart_count: int = 0

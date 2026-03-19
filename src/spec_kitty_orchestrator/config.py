@@ -14,6 +14,30 @@ from pathlib import Path
 from typing import Any
 
 
+def _expand_agent_family_variants(agent_ids: list[str]) -> list[str]:
+    """Expand family aliases into ordered concrete agent/model candidates."""
+    expanded: list[str] = []
+    for agent_id in agent_ids:
+        if agent_id == "gemini":
+            expanded.extend([
+                "gemini",
+                "gemini-2.5-flash-lite",
+                "gemini-2.5-flash",
+                "gemini-3-flash-preview",
+            ])
+        else:
+            expanded.append(agent_id)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for agent_id in expanded:
+        if agent_id in seen:
+            continue
+        seen.add(agent_id)
+        deduped.append(agent_id)
+    return deduped
+
+
 class FallbackStrategy(str, Enum):
     """Agent fallback strategy when the primary agent fails."""
 
@@ -55,10 +79,14 @@ class AgentSelectionConfig:
             Agent ID to use, or None if all exhausted.
         """
         tried_set = set(tried or [])
-        for agent_id in self.implementation_agents:
+        for agent_id in _expand_agent_family_variants(self.implementation_agents):
             if agent_id not in tried_set:
                 return agent_id
         return None
+
+    def implementation_candidates(self) -> list[str]:
+        """Return ordered implementation candidates after family expansion."""
+        return _expand_agent_family_variants(self.implementation_agents)
 
     def select_reviewer(
         self,
@@ -79,10 +107,16 @@ class AgentSelectionConfig:
         if self.single_agent_mode and impl_agent:
             return impl_agent
         tried_set = set(tried or [])
-        for agent_id in self.review_agents:
+        for agent_id in _expand_agent_family_variants(self.review_agents):
             if agent_id not in tried_set:
                 return agent_id
         return None
+
+    def review_candidates(self, impl_agent: str | None = None) -> list[str]:
+        """Return ordered review candidates after family expansion."""
+        if self.single_agent_mode and impl_agent:
+            return [impl_agent]
+        return _expand_agent_family_variants(self.review_agents)
 
 
 @dataclass

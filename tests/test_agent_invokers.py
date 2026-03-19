@@ -14,11 +14,11 @@ def test_gemini_invoker_passes_prompt_as_flag_argument() -> None:
     assert invoker.uses_stdin is True
     assert cmd == [
         "gemini",
+        "--model",
+        "auto",
         "--prompt",
         "stdin prompt follows",
         "--yolo",
-        "--allowed-mcp-server-names",
-        "openai-docs",
         "--output-format",
         "json",
     ]
@@ -38,3 +38,12 @@ def test_qwen_invoker_passes_prompt_as_flag_argument() -> None:
         "--output-format",
         "json",
     ]
+
+
+def test_get_invoker_supports_explicit_gemini_model_alias() -> None:
+    from spec_kitty_orchestrator.agents import get_invoker
+
+    invoker = get_invoker("gemini-2.5-flash-lite")
+
+    assert isinstance(invoker, GeminiInvoker)
+    assert invoker.model == "gemini-2.5-flash-lite"

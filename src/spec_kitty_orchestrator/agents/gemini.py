@@ -27,14 +27,17 @@ class GeminiInvoker(BaseInvoker):
     command = "gemini"
     uses_stdin = True
 
+    def __init__(self, model: str = "auto") -> None:
+        self.model = model
+
     def build_command(self, prompt: str, working_dir: Path, role: str) -> list[str]:
         return [
             "gemini",
+            "--model",
+            self.model,
             "--prompt",
             "stdin prompt follows",
             "--yolo",
-            "--allowed-mcp-server-names",
-            "openai-docs",
             "--output-format", "json",
         ]
 
@@ -82,6 +85,7 @@ class GeminiInvoker(BaseInvoker):
             return (GEMINI_EXIT_AUTH_ERROR, "Gemini authentication failure detected from stderr")
 
         rate_limit_markers = (
+            "you have exhausted your capacity on this model",
             "no capacity available for model",
             "model_capacity_exhausted",
             "resource_exhausted",
