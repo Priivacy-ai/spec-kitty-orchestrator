@@ -33,6 +33,8 @@ class GeminiInvoker(BaseInvoker):
             "--prompt",
             "stdin prompt follows",
             "--yolo",
+            "--allowed-mcp-server-names",
+            "openai-docs",
             "--output-format", "json",
         ]
 

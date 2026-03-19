@@ -17,6 +17,8 @@ def test_gemini_invoker_passes_prompt_as_flag_argument() -> None:
         "--prompt",
         "stdin prompt follows",
         "--yolo",
+        "--allowed-mcp-server-names",
+        "openai-docs",
         "--output-format",
         "json",
     ]
