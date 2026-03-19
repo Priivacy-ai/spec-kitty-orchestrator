@@ -34,6 +34,10 @@ The executor now:
 
 The orchestration loop now updates per-role heartbeat timestamps during execution so the provider state file reflects active progress.
 
+### 3. Resume picks up in-flight work
+
+The loop now resumes orphaned work packages already in `in_progress` or `for_review` by reconstructing their prompt/workspace paths and continuing from provider-local run state. This matters for real features where a prior run may have already finished implementation and only needs the review path resumed.
+
 ## Why the task workflow CLI is used for handoff
 
 Raw lane transitions are not sufficient for the implementation-to-review boundary because review readiness depends on more than lane state. The task workflow CLI already enforces checklist readiness and other workflow invariants. Reusing that path prevents the orchestrator from bypassing the same validation a human agent must satisfy.

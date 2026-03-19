@@ -12,7 +12,7 @@ from spec_kitty_orchestrator.config import AgentSelectionConfig, OrchestratorCon
 from spec_kitty_orchestrator.host.client import TransitionRejectedError
 from spec_kitty_orchestrator.loop import run_orchestration_loop
 from spec_kitty_orchestrator.policy import PolicyMetadata
-from spec_kitty_orchestrator.state import RunState
+from spec_kitty_orchestrator.state import RunState, WPExecution
 
 
 @dataclass
@@ -113,6 +113,48 @@ class _ReconcileThenReviewHost(_RejectedHandoffHost):
         self.move_attempts += 1
         self.lane = "for_review"
         return {"result": "success", "task_id": wp, "new_lane": "for_review"}
+
+
+class _RecoveryHost:
+    def __init__(self, repo_root: Path, lane: str = "for_review") -> None:
+        self.repo_root = repo_root
+        self.lane = lane
+        self.transitions: list[tuple[str, str, str | None, str | None]] = []
+        self.history: list[str] = []
+
+    def list_ready(self, feature: str) -> SimpleNamespace:
+        return SimpleNamespace(feature_slug=feature, ready_work_packages=[])
+
+    def feature_state(self, feature: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            feature_slug=feature,
+            summary={self.lane: 1},
+            work_packages=[_WorkPackage(wp_id="WP01", lane=self.lane, dependencies=[])],
+        )
+
+    def append_history(self, feature: str, wp: str, note: str) -> None:
+        self.history.append(note)
+
+    def transition(
+        self,
+        feature: str,
+        wp: str,
+        to: str,
+        note: str | None = None,
+        review_ref: str | None = None,
+    ) -> SimpleNamespace:
+        self.transitions.append((wp, to, note, review_ref))
+        self.lane = to
+        return SimpleNamespace(
+            feature_slug=feature,
+            wp_id=wp,
+            from_lane="for_review",
+            to_lane=to,
+            policy_metadata_recorded=True,
+        )
+
+    def start_review(self, feature: str, wp: str, review_ref: str) -> SimpleNamespace:
+        raise AssertionError("start_review should not be needed for the happy-path recovery test")
 
 
 def _make_run_state() -> RunState:
@@ -219,3 +261,34 @@ async def test_successful_impl_reconciles_subtasks_before_review_handoff(tmp_pat
     assert host.marked_subtasks[0] == ("T006", "T007")
     assert host.move_attempts == 1
     assert host.lane == "done"
+
+
+@pytest.mark.asyncio
+async def test_resume_picks_up_for_review_wp(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write_prompt(repo_root)
+    host = _RecoveryHost(repo_root)
+    run_state = _make_run_state()
+    run_state.wp_executions["WP01"] = WPExecution(
+        wp_id="WP01",
+        implementation_agent="gemini",
+    )
+    cfg = _make_cfg(repo_root)
+
+    review_result = InvocationResult(
+        success=True,
+        exit_code=0,
+        stdout='{"review":"approved"}\n',
+        stderr="",
+        duration_seconds=0.01,
+    )
+
+    with patch(
+        "spec_kitty_orchestrator.loop.execute_agent",
+        new=AsyncMock(return_value=review_result),
+    ), patch("spec_kitty_orchestrator.loop.get_invoker", return_value=MagicMock(agent_id="gemini")), \
+        patch("spec_kitty_orchestrator.loop.LOOP_POLL_INTERVAL", 0.0):
+        await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
+
+    assert host.lane == "done"
+    assert any(to == "done" for _, to, _, _ in host.transitions)

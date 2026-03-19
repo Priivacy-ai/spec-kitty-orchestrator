@@ -108,7 +108,7 @@ Shows the provider-local run state (retry counts, agent choices, errors) from th
 
 ### `resume`
 
-Resumes an interrupted run from saved state. The host already tracks lane state, so the loop simply re-polls for ready WPs.
+Resumes an interrupted run from saved state. The host already tracks lane state, and the loop now re-enters orphaned WPs already sitting in `in_progress` or `for_review` instead of only waiting for newly ready `planned` work.
 
 ### `abort`
 

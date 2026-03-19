@@ -47,6 +47,30 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resolve_wp_paths(repo_root: Path, feature: str, wp_id: str) -> tuple[Path, Path]:
+    """Resolve the canonical workspace and prompt paths for a WP."""
+    workspace_path = repo_root / ".worktrees" / f"{feature}-{wp_id}"
+    task_dir = repo_root / "kitty-specs" / feature / "tasks"
+    prompt_matches = sorted(task_dir.glob(f"{wp_id}*.md"))
+    if not prompt_matches:
+        raise OrchestrationError(
+            f"Cannot resolve prompt path for {feature}/{wp_id}: no matching task file found"
+        )
+    return workspace_path, prompt_matches[0]
+
+
+def _select_orphaned_recovery_mode(wp_exec: WPExecution) -> str:
+    """Pick a recovery mode for a WP stuck in `in_progress`."""
+    if (
+        wp_exec.review_started_at
+        or wp_exec.review_agent
+        or wp_exec.review_retries > 0
+        or wp_exec.review_feedback
+    ):
+        return "review"
+    return "implementation"
+
+
 def _extract_prompt_subtasks(prompt_text: str) -> list[str]:
     """Parse WP frontmatter and return declared subtasks."""
     lines = prompt_text.splitlines()
@@ -140,6 +164,153 @@ def _reconcile_wp_subtasks(
         f"Reconciled subtasks as done after successful implementation: {', '.join(subtasks)}",
     )
     return subtasks
+
+
+async def _run_review_phase(
+    wp_id: str,
+    feature: str,
+    workspace_path: Path,
+    prompt_path: Path,
+    impl_agent_id: str,
+    host: HostClient,
+    run_state: RunState,
+    agent_cfg: AgentSelectionConfig,
+    cfg: OrchestratorConfig,
+) -> None:
+    """Execute review and any follow-up rework cycles for an already-implemented WP."""
+    wp_exec = run_state.get_or_create_wp(wp_id)
+
+    try:
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.error("Cannot read prompt %s: %s", prompt_path, exc)
+        _mark_failed(wp_exec, str(exc))
+        save_state(run_state, cfg.state_file)
+        return
+
+    review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
+    review_cycle = wp_exec.review_retries
+    review_done = False
+
+    while not review_done:
+        review_cycle += 1
+        wp_exec.review_agent = review_agent_id
+        review_log = get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}")
+        wp_exec.log_file = str(review_log)
+        save_state(run_state, cfg.state_file)
+
+        host.append_history(
+            feature, wp_id,
+            f"Starting review cycle {review_cycle} with '{review_agent_id}'"
+        )
+
+        review_result = await _execute_with_heartbeat(
+            invoker=get_invoker(review_agent_id),
+            prompt_text=prompt_text,
+            workspace_path=workspace_path,
+            role="review",
+            timeout_seconds=agent_cfg.timeout_seconds,
+            log_file=review_log,
+            wp_exec=wp_exec,
+            run_state=run_state,
+            cfg=cfg,
+        )
+
+        if is_success(review_result):
+            review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
+            try:
+                host.transition(
+                    feature, wp_id, "done",
+                    note=f"Review approved by '{review_agent_id}'",
+                    review_ref=review_ref,
+                )
+                review_done = True
+                host.append_history(feature, wp_id, f"Review approved in cycle {review_cycle}")
+                logger.info("WP %s completed successfully", wp_id)
+            except TransitionRejectedError as exc:
+                logger.error("WP %s: done transition rejected: %s", wp_id, exc)
+            break
+
+        feedback = extract_review_feedback(review_result)
+        wp_exec.review_feedback = feedback
+        wp_exec.review_retries += 1
+        save_state(run_state, cfg.state_file)
+
+        if wp_exec.review_retries > agent_cfg.max_retries:
+            logger.error("WP %s: review retry limit exceeded", wp_id)
+            host.append_history(feature, wp_id, "FAILED: review retry limit exceeded")
+            try:
+                host.transition(feature, wp_id, "blocked", note="Review cycle limit exceeded")
+            except Exception:
+                pass
+            break
+
+        feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
+        host.append_history(
+            feature, wp_id,
+            f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
+        )
+
+        try:
+            host.start_review(feature, wp_id, review_ref=feedback_ref)
+        except TransitionRejectedError as exc:
+            logger.error("WP %s: start-review (re-impl trigger) rejected: %s", wp_id, exc)
+            break
+
+        reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
+        reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
+        reimpl_result = await _execute_with_heartbeat(
+            invoker=get_invoker(impl_agent_id),
+            prompt_text=reimpl_prompt,
+            workspace_path=workspace_path,
+            role="implementation",
+            timeout_seconds=agent_cfg.timeout_seconds,
+            log_file=reimpl_log,
+            wp_exec=wp_exec,
+            run_state=run_state,
+            cfg=cfg,
+        )
+        if not is_success(reimpl_result):
+            error_msg = truncate_error(
+                "; ".join(reimpl_result.errors) if reimpl_result.errors else "rework failed"
+            )
+            host.append_history(feature, wp_id, f"Re-implementation failed: {error_msg}")
+            try:
+                host.transition(feature, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
+            except Exception:
+                pass
+            break
+
+        try:
+            _reconcile_wp_subtasks(host, feature, wp_id, prompt_text)
+            host.move_task_for_review(
+                feature,
+                wp_id,
+                impl_agent_id,
+                note=f"Re-implementation complete (cycle {review_cycle})",
+            )
+        except (TransitionRejectedError, TaskWorkflowError) as exc:
+            error_msg = truncate_error(str(exc))
+            logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
+            host.append_history(
+                feature,
+                wp_id,
+                f"FAILED: re-implementation handoff rejected: {error_msg}",
+            )
+            try:
+                host.transition(
+                    feature,
+                    wp_id,
+                    "blocked",
+                    note=f"Re-implementation handoff rejected: {error_msg}",
+                )
+            except Exception:
+                pass
+            wp_exec.last_error = error_msg
+            save_state(run_state, cfg.state_file)
+            break
+
+    save_state(run_state, cfg.state_file)
 
 
 async def execute_and_advance(
@@ -266,127 +437,17 @@ async def execute_and_advance(
         save_state(run_state, cfg.state_file)
         return
 
-    # ── Review phase ──────────────────────────────────────────────────────
-    # WP is in for_review. The reviewer runs while the WP *stays* in for_review.
-    # Allowed transitions from for_review:
-    #   for_review → done          (reviewer approved)
-    #   for_review → in_progress   (reviewer rejected; via start_review)
-    # in_progress → done is NOT allowed, so start_review must NOT be called
-    # before running the review agent.
-
-    review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
-    review_cycle = 0
-    review_done = False
-
-    while not review_done:
-        review_cycle += 1
-
-        wp_exec.review_agent = review_agent_id
-        review_log = get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}")
-        save_state(run_state, cfg.state_file)
-
-        host.append_history(
-            feature, wp_id,
-            f"Starting review cycle {review_cycle} with '{review_agent_id}'"
-        )
-
-        # Run review while WP remains in for_review
-        review_result = await _execute_with_heartbeat(
-            invoker=get_invoker(review_agent_id),
-            prompt_text=prompt_text,
-            workspace_path=workspace_path,
-            role="review",
-            timeout_seconds=agent_cfg.timeout_seconds,
-            log_file=review_log,
-            wp_exec=wp_exec,
-            run_state=run_state,
-            cfg=cfg,
-        )
-
-        if is_success(review_result):
-            # Approved: for_review → done  (this transition IS allowed)
-            review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
-            try:
-                host.transition(
-                    feature, wp_id, "done",
-                    note=f"Review approved by '{review_agent_id}'",
-                    review_ref=review_ref,
-                )
-                review_done = True
-                host.append_history(feature, wp_id, f"Review approved in cycle {review_cycle}")
-                logger.info("WP %s completed successfully", wp_id)
-            except TransitionRejectedError as exc:
-                logger.error("WP %s: done transition rejected: %s", wp_id, exc)
-            break
-
-        # Rejected — extract feedback, enforce retry limit
-        feedback = extract_review_feedback(review_result)
-        wp_exec.review_feedback = feedback
-        wp_exec.review_retries += 1
-        save_state(run_state, cfg.state_file)
-
-        if wp_exec.review_retries > agent_cfg.max_retries:
-            logger.error("WP %s: review retry limit exceeded", wp_id)
-            host.append_history(feature, wp_id, "FAILED: review retry limit exceeded")
-            try:
-                host.transition(feature, wp_id, "blocked", note="Review cycle limit exceeded")
-            except Exception:
-                pass
-            break
-
-        feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
-        host.append_history(
-            feature, wp_id,
-            f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
-        )
-
-        # for_review → in_progress via start_review (the right use of start_review:
-        # triggering a re-implementation cycle after rejection)
-        try:
-            host.start_review(feature, wp_id, review_ref=feedback_ref)
-        except TransitionRejectedError as exc:
-            logger.error("WP %s: start-review (re-impl trigger) rejected: %s", wp_id, exc)
-            break
-
-        # Run re-implementation with review feedback
-        reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
-        reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
-        reimpl_result = await _execute_with_heartbeat(
-            invoker=get_invoker(impl_agent_id),
-            prompt_text=reimpl_prompt,
-            workspace_path=workspace_path,
-            role="implementation",
-            timeout_seconds=agent_cfg.timeout_seconds,
-            log_file=reimpl_log,
-            wp_exec=wp_exec,
-            run_state=run_state,
-            cfg=cfg,
-        )
-        if not is_success(reimpl_result):
-            error_msg = truncate_error(
-                "; ".join(reimpl_result.errors) if reimpl_result.errors else "rework failed"
-            )
-            host.append_history(feature, wp_id, f"Re-implementation failed: {error_msg}")
-            try:
-                host.transition(feature, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
-            except Exception:
-                pass
-            break
-
-        # in_progress → for_review (back to review queue for next cycle)
-        try:
-            _reconcile_wp_subtasks(host, feature, wp_id, prompt_text)
-            host.move_task_for_review(
-                feature,
-                wp_id,
-                impl_agent_id,
-                note=f"Re-implementation complete (cycle {review_cycle})",
-            )
-        except (TransitionRejectedError, TaskWorkflowError) as exc:
-            logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
-            break
-
-    save_state(run_state, cfg.state_file)
+    await _run_review_phase(
+        wp_id=wp_id,
+        feature=feature,
+        workspace_path=workspace_path,
+        prompt_path=prompt_path,
+        impl_agent_id=impl_agent_id,
+        host=host,
+        run_state=run_state,
+        agent_cfg=agent_cfg,
+        cfg=cfg,
+    )
 
 
 def _build_rework_prompt(original_prompt: str, feedback: str | None) -> str:
@@ -432,16 +493,20 @@ async def run_orchestration_loop(
     while True:
         ready_data = host.list_ready(feature)
         ready_wps = ready_data.ready_work_packages
+        state_data = host.feature_state(feature)
 
         # Filter out already-active WPs
         schedulable = [
             wp for wp in ready_wps
             if not concurrency.is_active(wp.wp_id)
         ]
+        recovery_candidates = [
+            wp for wp in state_data.work_packages
+            if wp.lane in {"in_progress", "for_review"} and not concurrency.is_active(wp.wp_id)
+        ]
 
-        if not schedulable and concurrency.active_count() == 0:
+        if not schedulable and not recovery_candidates and concurrency.active_count() == 0:
             # Check if all WPs are done
-            state_data = host.feature_state(feature)
             all_lanes = [wp.lane for wp in state_data.work_packages]
             terminal_lanes = {"done", "canceled", "blocked"}
             if all(lane in terminal_lanes for lane in all_lanes if lane):
@@ -459,6 +524,56 @@ async def run_orchestration_loop(
                 )
         else:
             empty_ready_streak = 0
+
+        # Resume any orphaned in-flight WPs before claiming new planned work.
+        for wp in recovery_candidates:
+            if not concurrency.has_slot():
+                break
+
+            try:
+                workspace_path, prompt_path = _resolve_wp_paths(cfg.repo_root, feature, wp.wp_id)
+            except OrchestrationError as exc:
+                logger.error("WP %s: cannot resolve recovery paths: %s", wp.wp_id, exc)
+                continue
+
+            wp_exec = run_state.get_or_create_wp(wp.wp_id)
+            impl_agent_id = wp_exec.implementation_agent
+            if impl_agent_id is None:
+                try:
+                    impl_agent_id = select_implementer(agent_cfg, wp_exec.fallback_agents_tried)
+                except NoAgentAvailableError:
+                    logger.warning("WP %s: no implementation agent available for recovery", wp.wp_id)
+                    continue
+
+            if wp.lane == "for_review":
+                logger.info("WP %s: resuming orphaned review cycle", wp.wp_id)
+                task_factory = _run_review_task
+            elif _select_orphaned_recovery_mode(wp_exec) == "review":
+                logger.info("WP %s: resuming orphaned in-progress review cycle", wp.wp_id)
+                task_factory = _run_review_task
+            else:
+                logger.info("WP %s: resuming orphaned implementation cycle", wp.wp_id)
+                task_factory = _run_wp_task
+
+            concurrency.mark_active(wp.wp_id)
+            await concurrency.acquire()
+
+            task = asyncio.create_task(
+                task_factory(
+                    wp.wp_id,
+                    feature,
+                    workspace_path,
+                    prompt_path,
+                    impl_agent_id,
+                    host,
+                    run_state,
+                    agent_cfg,
+                    cfg,
+                    concurrency,
+                )
+            )
+            active_tasks.add(task)
+            task.add_done_callback(active_tasks.discard)
 
         # Schedule ready WPs
         for wp in schedulable:
@@ -534,6 +649,36 @@ async def _run_wp_task(
         await execute_and_advance(
             wp_id, feature, workspace_path, prompt_path,
             impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
+        )
+    finally:
+        concurrency.mark_idle(wp_id)
+        concurrency.release()
+
+
+async def _run_review_task(
+    wp_id: str,
+    feature: str,
+    workspace_path: Path,
+    prompt_path: Path,
+    impl_agent_id: str,
+    host: HostClient,
+    run_state: RunState,
+    agent_cfg: AgentSelectionConfig,
+    cfg: OrchestratorConfig,
+    concurrency: ConcurrencyManager,
+) -> None:
+    """Wrapper that resumes review for an in-flight WP and releases the slot."""
+    try:
+        await _run_review_phase(
+            wp_id=wp_id,
+            feature=feature,
+            workspace_path=workspace_path,
+            prompt_path=prompt_path,
+            impl_agent_id=impl_agent_id,
+            host=host,
+            run_state=run_state,
+            agent_cfg=agent_cfg,
+            cfg=cfg,
         )
     finally:
         concurrency.mark_idle(wp_id)
