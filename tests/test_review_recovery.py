@@ -10,7 +10,7 @@ import pytest
 from spec_kitty_orchestrator.agents.base import InvocationResult
 from spec_kitty_orchestrator.config import AgentSelectionConfig, OrchestratorConfig
 from spec_kitty_orchestrator.host.client import TransitionRejectedError
-from spec_kitty_orchestrator.loop import run_orchestration_loop
+from spec_kitty_orchestrator.loop import _prepare_workspace_prompt, run_orchestration_loop
 from spec_kitty_orchestrator.policy import PolicyMetadata
 from spec_kitty_orchestrator.state import RunState, WPExecution
 
@@ -209,6 +209,45 @@ def _write_prompt(repo_root: Path) -> None:
         "# prompt\n",
         encoding="utf-8",
     )
+
+
+def test_prepare_workspace_prompt_mirrors_feature_context_and_rewrites_paths(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    feature = "004-aegis-live-runtime-mvp"
+    workspace_path = repo_root / ".worktrees" / f"{feature}-WP01"
+    workspace_path.mkdir(parents=True)
+
+    feature_dir = repo_root / "kitty-specs" / feature
+    feature_dir.mkdir(parents=True)
+    (feature_dir / "spec.md").write_text("# spec\n", encoding="utf-8")
+    (feature_dir / "plan.md").write_text("# plan\n", encoding="utf-8")
+
+    prompt_text = (
+        "Context:\n"
+        f"- {repo_root / 'kitty-specs' / feature / 'spec.md'}\n"
+        f"- {repo_root / 'kitty-specs' / feature / 'plan.md'}\n"
+    )
+
+    prepared_prompt, cleanup = _prepare_workspace_prompt(
+        prompt_text=prompt_text,
+        repo_root=repo_root,
+        workspace_path=workspace_path,
+        feature=feature,
+    )
+
+    mirrored_spec = workspace_path / "kitty-specs" / feature / "spec.md"
+    mirrored_plan = workspace_path / "kitty-specs" / feature / "plan.md"
+
+    assert mirrored_spec.exists()
+    assert mirrored_plan.exists()
+    assert str(workspace_path / "kitty-specs" / feature / "spec.md") in prepared_prompt
+    assert str(workspace_path / "kitty-specs" / feature / "plan.md") in prepared_prompt
+    assert str(repo_root / "kitty-specs" / feature / "spec.md") not in prepared_prompt
+    assert "Workspace Planning Context" in prepared_prompt
+
+    cleanup()
+
+    assert not (workspace_path / "kitty-specs").exists()
 
 
 @pytest.mark.asyncio
@@ -433,3 +472,26 @@ async def test_resume_backfills_missing_review_fallback_history(tmp_path: Path) 
         "gemini-2.5-flash-lite",
     ]
     assert host.lane == "done"
+
+
+@pytest.mark.asyncio
+async def test_review_task_crash_marks_wp_blocked(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    _write_prompt(repo_root)
+    host = _RecoveryHost(repo_root)
+    run_state = _make_run_state()
+    run_state.wp_executions["WP01"] = WPExecution(
+        wp_id="WP01",
+        implementation_agent="gemini",
+    )
+    cfg = _make_cfg(repo_root)
+
+    with patch(
+        "spec_kitty_orchestrator.loop._run_review_phase",
+        new=AsyncMock(side_effect=RuntimeError("log pump crashed")),
+    ), patch("spec_kitty_orchestrator.loop.LOOP_POLL_INTERVAL", 0.0):
+        await run_orchestration_loop("004-aegis-live-runtime-mvp", host, run_state, cfg)
+
+    assert host.lane == "blocked"
+    assert "log pump crashed" in (run_state.wp_executions["WP01"].last_error or "")
+    assert any("review task crashed" in note.lower() for note in host.history)
