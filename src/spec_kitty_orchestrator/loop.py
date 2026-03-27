@@ -159,14 +159,48 @@ def _workspace_requires_rebootstrap(repo_root: Path, feature: str, wp_id: str, w
     if not workspace_path.exists():
         return False
 
-    if _git_status_lines(workspace_path):
+    try:
+        status_lines = _git_status_lines(workspace_path)
+    except OrchestrationError:
+        return True
+
+    if status_lines:
         return True
 
     recorded_base = _workspace_metadata_base_commit(repo_root, feature, wp_id)
     if not recorded_base:
         return False
 
-    return _git_head(workspace_path) != recorded_base
+    try:
+        return _git_head(workspace_path) != recorded_base
+    except OrchestrationError:
+        return True
+
+
+def _refresh_workspace(repo_root: Path, feature: str, wp_id: str, workspace_path: Path) -> Path:
+    """Reset a provider-owned workspace back to its recorded base commit."""
+    recorded_base = _workspace_metadata_base_commit(repo_root, feature, wp_id)
+    reset_target = recorded_base or "HEAD"
+
+    for cmd in (
+        ["git", "reset", "--hard", reset_target],
+        ["git", "clean", "-fd"],
+    ):
+        result = _run_command(cmd, workspace_path)
+        if result.returncode != 0:
+            raise OrchestrationError(
+                f"Failed to refresh workspace for {wp_id}: {result.stderr.strip() or result.stdout.strip()}"
+            )
+
+    if _git_status_lines(workspace_path):
+        raise OrchestrationError(f"Workspace for {wp_id} remained dirty after refresh")
+
+    if recorded_base and _git_head(workspace_path) != recorded_base:
+        raise OrchestrationError(
+            f"Workspace for {wp_id} did not reset to recorded base {recorded_base}"
+        )
+
+    return workspace_path
 
 
 def _finalize_successful_implementation(
@@ -208,10 +242,10 @@ def _ensure_workspace_exists(repo_root: Path, feature: str, wp_id: str, workspac
         "--json",
     ]
 
-    if workspace_path.exists() and not _workspace_requires_rebootstrap(
-        repo_root, feature, wp_id, workspace_path
-    ):
-        return workspace_path
+    if workspace_path.exists():
+        if not _workspace_requires_rebootstrap(repo_root, feature, wp_id, workspace_path):
+            return workspace_path
+        return _refresh_workspace(repo_root, feature, wp_id, workspace_path)
 
     attempts = [base_cmd[:-1] + ["--force", "--json"], base_cmd]
     last_error = "workspace bootstrap failed"
