@@ -8,8 +8,11 @@ persisted via save_state after each significant event.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .agents import get_invoker
@@ -39,6 +42,202 @@ class OrchestrationError(Exception):
 
 class DeadlockError(OrchestrationError):
     """Raised when the loop detects a dependency deadlock."""
+
+
+def _now_utc() -> str:
+    """Return an ISO-8601 UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _run_command(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess command and capture text output."""
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=cwd,
+    )
+
+
+def _git_head(workspace_path: Path) -> str:
+    """Return the current HEAD commit SHA for a worktree."""
+    result = _run_command(["git", "rev-parse", "HEAD"], workspace_path)
+    if result.returncode != 0:
+        raise OrchestrationError(
+            f"Failed to read HEAD for {workspace_path}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def _git_status_lines(workspace_path: Path) -> list[str]:
+    """Return porcelain status lines for a worktree."""
+    result = _run_command(["git", "status", "--short"], workspace_path)
+    if result.returncode != 0:
+        raise OrchestrationError(
+            f"Failed to inspect git status for {workspace_path}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _commit_all_changes(workspace_path: Path, wp_id: str, context: str) -> str:
+    """Stage and commit all worktree changes with required attribution."""
+    add_result = _run_command(["git", "add", "-A"], workspace_path)
+    if add_result.returncode != 0:
+        raise OrchestrationError(
+            f"Failed to stage changes for {wp_id}: {add_result.stderr.strip() or add_result.stdout.strip()}"
+        )
+
+    message = (
+        f"feat({wp_id}): {context}\n\n"
+        "Co-Authored-By: Codex GPT-5 <noreply@openai.com>\n"
+    )
+    commit_result = _run_command(["git", "commit", "-m", message], workspace_path)
+    if commit_result.returncode != 0:
+        raise OrchestrationError(
+            f"Failed to commit changes for {wp_id}: {commit_result.stderr.strip() or commit_result.stdout.strip()}"
+        )
+    return _git_head(workspace_path)
+
+
+def _extract_subtasks(prompt_text: str) -> list[str]:
+    """Extract frontmatter subtask IDs from a WP prompt."""
+    lines = prompt_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+
+    try:
+        end_idx = lines[1:].index("---") + 1
+    except ValueError:
+        return []
+
+    subtasks: list[str] = []
+    in_subtasks = False
+    for line in lines[1:end_idx]:
+        if line.startswith("subtasks:"):
+            in_subtasks = True
+            continue
+        if not in_subtasks:
+            continue
+        if line.startswith("- "):
+            subtasks.append(line[2:].strip())
+            continue
+        if line.strip():
+            break
+    return subtasks
+
+
+def _sanitize_prompt_paths(prompt_text: str, repo_root: Path, workspace_path: Path) -> str:
+    """Rewrite absolute repo-root references to the assigned worktree path."""
+    repo_root_str = str(repo_root.resolve())
+    workspace_root_str = str(workspace_path.resolve())
+    rewritten = prompt_text.replace(repo_root_str, workspace_root_str)
+    guardrail = (
+        "\n\n## Orchestrator Guardrails\n\n"
+        f"- You are running inside the assigned worktree: `{workspace_root_str}`.\n"
+        "- Do not edit files outside the current worktree.\n"
+        "- Complete implementation in the worktree, leave it commit-ready, and do not claim success without real file changes.\n"
+    )
+    return rewritten + guardrail
+
+
+def _workspace_metadata_base_commit(repo_root: Path, feature: str, wp_id: str) -> str | None:
+    """Return the recorded base commit for a host-managed workspace, if any."""
+    metadata_path = repo_root / ".kittify" / "workspaces" / f"{feature}-{wp_id}.json"
+    if not metadata_path.exists():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    base_commit = payload.get("base_commit")
+    return str(base_commit) if base_commit else None
+
+
+def _workspace_requires_rebootstrap(repo_root: Path, feature: str, wp_id: str, workspace_path: Path) -> bool:
+    """Return True when an existing workspace no longer matches its recorded base."""
+    if not workspace_path.exists():
+        return False
+
+    if _git_status_lines(workspace_path):
+        return True
+
+    recorded_base = _workspace_metadata_base_commit(repo_root, feature, wp_id)
+    if not recorded_base:
+        return False
+
+    return _git_head(workspace_path) != recorded_base
+
+
+def _finalize_successful_implementation(
+    host: HostClient,
+    workspace_path: Path,
+    feature: str,
+    wp_id: str,
+    prompt_text: str,
+    baseline_head: str,
+    context: str,
+) -> str:
+    """Require real worktree evidence, then reconcile commit and task state."""
+    dirty_before = _git_status_lines(workspace_path)
+    head_before = _git_head(workspace_path)
+    if not dirty_before and head_before == baseline_head:
+        raise OrchestrationError(
+            f"{wp_id} reported success without any worktree changes or commits"
+        )
+
+    if dirty_before:
+        _commit_all_changes(workspace_path, wp_id, context)
+
+    host.mark_subtasks_done(feature, _extract_subtasks(prompt_text))
+
+    dirty_after = _git_status_lines(workspace_path)
+    if dirty_after:
+        _commit_all_changes(workspace_path, wp_id, f"{context} follow-up")
+    return _git_head(workspace_path)
+
+
+def _ensure_workspace_exists(repo_root: Path, feature: str, wp_id: str, workspace_path: Path) -> Path:
+    """Materialize or refresh the host-managed workspace when required."""
+    base_cmd = [
+        "spec-kitty",
+        "implement",
+        wp_id,
+        "--feature",
+        feature,
+        "--json",
+    ]
+
+    if workspace_path.exists() and not _workspace_requires_rebootstrap(
+        repo_root, feature, wp_id, workspace_path
+    ):
+        return workspace_path
+
+    attempts = [base_cmd[:-1] + ["--force", "--json"], base_cmd]
+    last_error = "workspace bootstrap failed"
+
+    for cmd in attempts:
+        result = _run_command(cmd, repo_root)
+        if result.returncode == 0:
+            try:
+                payload = json.loads(result.stdout.strip())
+            except json.JSONDecodeError:
+                payload = {}
+            resolved = payload.get("workspace_path") or payload.get("workspace")
+            if resolved:
+                return (repo_root / resolved).resolve()
+            if workspace_path.exists():
+                return workspace_path
+            last_error = "implement succeeded but workspace path was still missing"
+            continue
+
+        stderr = result.stderr.strip()
+        stdout = result.stdout.strip()
+        last_error = stderr or stdout or f"exit code {result.returncode}"
+
+    raise OrchestrationError(
+        f"Failed to create workspace for {wp_id} at {workspace_path}: {last_error}"
+    )
 
 
 async def execute_and_advance(
@@ -81,6 +280,8 @@ async def execute_and_advance(
         _mark_failed(wp_exec, str(exc))
         save_state(run_state, cfg.state_file)
         return
+    prompt_text = _sanitize_prompt_paths(prompt_text, cfg.repo_root, workspace_path)
+    baseline_head = _git_head(workspace_path)
 
     # ── Implementation phase ──────────────────────────────────────────────
 
@@ -89,6 +290,7 @@ async def execute_and_advance(
         invoker = get_invoker(impl_agent_id)
         log_file = get_log_path(cfg.log_dir, feature, wp_id, "implementation")
         wp_exec.log_file = str(log_file)
+        wp_exec.implementation_started_at = wp_exec.implementation_started_at or _now_utc()
         save_state(run_state, cfg.state_file)
 
         host.append_history(
@@ -104,7 +306,29 @@ async def execute_and_advance(
         )
 
         if is_success(result):
+            try:
+                baseline_head = _finalize_successful_implementation(
+                    host=host,
+                    workspace_path=workspace_path,
+                    feature=feature,
+                    wp_id=wp_id,
+                    prompt_text=prompt_text,
+                    baseline_head=baseline_head,
+                    context="implementation output",
+                )
+            except OrchestrationError as exc:
+                logger.warning("WP %s: implementation finalization failed: %s", wp_id, exc)
+                wp_exec.last_error = truncate_error(str(exc))
+                host.append_history(feature, wp_id, f"FAILED: {exc}")
+                try:
+                    host.transition(feature, wp_id, "blocked", note=str(exc))
+                except Exception:
+                    pass
+                save_state(run_state, cfg.state_file)
+                return
             impl_success = True
+            wp_exec.implementation_completed_at = _now_utc()
+            wp_exec.last_error = None
             host.append_history(
                 feature, wp_id,
                 f"Implementation completed successfully by '{impl_agent_id}'"
@@ -145,10 +369,23 @@ async def execute_and_advance(
 
     # Transition to for_review
     try:
-        host.transition(feature, wp_id, "for_review", note=f"Implementation by '{impl_agent_id}' complete")
+        host.emit_status_transition(
+            feature,
+            wp_id,
+            "for_review",
+            subtasks_complete=True,
+            implementation_evidence_present=True,
+        )
+        host.append_history(feature, wp_id, f"Implementation by '{impl_agent_id}' complete")
     except TransitionRejectedError as exc:
         logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
-        _mark_failed(wp_exec, str(exc))
+        message = f"Review handoff rejected after successful implementation: {exc}"
+        _mark_failed(wp_exec, message)
+        host.append_history(feature, wp_id, f"FAILED: {message}")
+        try:
+            host.transition(feature, wp_id, "blocked", note=message)
+        except Exception:
+            pass
         save_state(run_state, cfg.state_file)
         return
 
@@ -168,7 +405,9 @@ async def execute_and_advance(
         review_cycle += 1
 
         wp_exec.review_agent = review_agent_id
+        wp_exec.log_file = str(get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}"))
         review_log = get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}")
+        wp_exec.review_started_at = wp_exec.review_started_at or _now_utc()
         save_state(run_state, cfg.state_file)
 
         host.append_history(
@@ -190,15 +429,34 @@ async def execute_and_advance(
             # Approved: for_review → done  (this transition IS allowed)
             review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
             try:
-                host.transition(
-                    feature, wp_id, "done",
-                    note=f"Review approved by '{review_agent_id}'",
+                host.emit_status_transition(
+                    feature,
+                    wp_id,
+                    "done",
                     review_ref=review_ref,
+                    evidence={
+                        "review": {
+                            "reviewer": review_agent_id,
+                            "verdict": "approved",
+                            "reference": review_ref,
+                        }
+                    },
                 )
                 review_done = True
+                wp_exec.review_completed_at = _now_utc()
+                wp_exec.last_error = None
+                save_state(run_state, cfg.state_file)
                 host.append_history(feature, wp_id, f"Review approved in cycle {review_cycle}")
                 logger.info("WP %s completed successfully", wp_id)
             except TransitionRejectedError as exc:
+                message = f"Review approval could not be recorded: {exc}"
+                wp_exec.last_error = truncate_error(message)
+                save_state(run_state, cfg.state_file)
+                host.append_history(feature, wp_id, f"FAILED: {message}")
+                try:
+                    host.transition(feature, wp_id, "blocked", note=message)
+                except Exception:
+                    pass
                 logger.error("WP %s: done transition rejected: %s", wp_id, exc)
             break
 
@@ -206,6 +464,7 @@ async def execute_and_advance(
         feedback = extract_review_feedback(review_result)
         wp_exec.review_feedback = feedback
         wp_exec.review_retries += 1
+        wp_exec.last_error = truncate_error(feedback or "review rejected")
         save_state(run_state, cfg.state_file)
 
         if wp_exec.review_retries > agent_cfg.max_retries:
@@ -253,12 +512,35 @@ async def execute_and_advance(
                 pass
             break
 
+        try:
+            baseline_head = _finalize_successful_implementation(
+                host=host,
+                workspace_path=workspace_path,
+                feature=feature,
+                wp_id=wp_id,
+                prompt_text=prompt_text,
+                baseline_head=baseline_head,
+                context=f"review cycle {review_cycle} reimplementation",
+            )
+        except OrchestrationError as exc:
+            logger.error("WP %s: reimplementation finalization failed: %s", wp_id, exc)
+            host.append_history(feature, wp_id, f"FAILED: {exc}")
+            try:
+                host.transition(feature, wp_id, "blocked", note=str(exc))
+            except Exception:
+                pass
+            break
+
         # in_progress → for_review (back to review queue for next cycle)
         try:
-            host.transition(
-                feature, wp_id, "for_review",
-                note=f"Re-implementation complete (cycle {review_cycle})"
+            host.emit_status_transition(
+                feature,
+                wp_id,
+                "for_review",
+                subtasks_complete=True,
+                implementation_evidence_present=True,
             )
+            host.append_history(feature, wp_id, f"Re-implementation complete (cycle {review_cycle})")
         except TransitionRejectedError as exc:
             logger.error("WP %s: for_review re-transition rejected: %s", wp_id, exc)
             break
@@ -362,6 +644,21 @@ async def run_orchestration_loop(
                 continue
 
             workspace_path = Path(impl_resp.workspace_path)
+            try:
+                workspace_path = _ensure_workspace_exists(
+                    cfg.repo_root, feature, wp.wp_id, workspace_path
+                )
+            except OrchestrationError as exc:
+                logger.error("WP %s: workspace preparation failed: %s", wp.wp_id, exc)
+                wp_exec = run_state.get_or_create_wp(wp.wp_id)
+                wp_exec.last_error = truncate_error(str(exc))
+                save_state(run_state, cfg.state_file)
+                host.append_history(feature, wp.wp_id, f"FAILED: {exc}")
+                try:
+                    host.transition(feature, wp.wp_id, "blocked", note=str(exc))
+                except Exception:
+                    pass
+                continue
             prompt_path = Path(impl_resp.prompt_path)
 
             concurrency.mark_active(wp.wp_id)
