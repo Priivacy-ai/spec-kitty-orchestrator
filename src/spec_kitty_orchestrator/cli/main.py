@@ -20,7 +20,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from ..config import load_config
+from ..config import OrchestratorConfig, load_config
 from ..host.client import HostClient, ContractMismatchError
 from ..loop import OrchestrationError, run_orchestration_loop
 from ..policy import PolicyMetadata
@@ -49,6 +49,27 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+
+def _build_policy(cfg: OrchestratorConfig) -> PolicyMetadata:
+    """Build policy metadata from the resolved agent configuration."""
+    selected_agents = [
+        *cfg.agent_selection.implementation_agents,
+        *cfg.agent_selection.review_agents,
+    ]
+    primary_agent = next((agent for agent in selected_agents if agent), "unknown")
+    dangerous_flags = ["--yolo"] if primary_agent in {"qwen", "gemini", "copilot", "kilocode"} else []
+
+    return PolicyMetadata(
+        orchestrator_id=_DEFAULT_POLICY.orchestrator_id,
+        orchestrator_version=_DEFAULT_POLICY.orchestrator_version,
+        agent_family=primary_agent,
+        approval_mode="full_auto",
+        sandbox_mode="workspace_write",
+        network_mode="open",
+        dangerous_flags=dangerous_flags,
+        tool_restrictions=None,
+    )
 
 
 def _find_repo_root() -> Path:
@@ -81,7 +102,7 @@ def orchestrate(
 
     cfg = load_config(root, actor, **cfg_overrides)
 
-    policy = _DEFAULT_POLICY
+    policy = _build_policy(cfg)
     try:
         policy.validate()
     except ValueError as exc:

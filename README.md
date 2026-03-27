@@ -2,7 +2,7 @@
 
 External orchestrator for the [spec-kitty](https://github.com/spec-kitty/spec-kitty) workflow system.
 
-Coordinates multiple AI agents to autonomously implement and review work packages (WPs) in parallel. Integrates with spec-kitty **exclusively** via the versioned `orchestrator-api` CLI contract — no direct file access, no internal imports.
+Coordinates multiple AI agents to autonomously implement and review work packages (WPs) in parallel. Integrates with spec-kitty via the versioned `orchestrator-api` CLI contract plus host-owned `agent status` / `agent tasks` commands for evidence-backed review handoff and authoritative task reconciliation.
 
 ---
 
@@ -11,7 +11,7 @@ Coordinates multiple AI agents to autonomously implement and review work package
 ```
 spec-kitty-orchestrator
         │
-        │  spec-kitty orchestrator-api <cmd> --json
+        │  spec-kitty orchestrator-api <cmd> [--json]
         ▼
    spec-kitty (host)
         │
@@ -50,7 +50,7 @@ pip install -e ".[dev]"
 
 ```bash
 # Verify contract compatibility with the installed spec-kitty
-spec-kitty orchestrator-api contract-version --json
+spec-kitty orchestrator-api contract-version
 
 # Dry-run to validate configuration
 spec-kitty-orchestrator orchestrate --feature 034-my-feature --dry-run
@@ -166,11 +166,11 @@ Every host mutation call includes a `PolicyMetadata` block that declares the orc
 PolicyMetadata(
     orchestrator_id="spec-kitty-orchestrator",
     orchestrator_version="0.1.0",
-    agent_family="claude",
+    agent_family="qwen",
     approval_mode="full_auto",   # full_auto | interactive | supervised
     sandbox_mode="workspace_write",  # workspace_write | read_only | none
-    network_mode="none",         # allowlist | none | open
-    dangerous_flags=[],
+    network_mode="open",         # allowlist | none | open
+    dangerous_flags=["--yolo"],
 )
 ```
 
@@ -178,14 +178,14 @@ Policy fields are validated on both sides: the provider rejects secret-like valu
 
 ---
 
-## Security boundary
+## Host boundary
 
 The orchestrator has **no direct access** to spec-kitty internals:
 
 - No imports from `specify_cli` or `spec_kitty_events`
 - No direct reads or writes to `kitty-specs/`
-- No git operations — worktree creation is delegated to the host via `start-implementation`
-- All state mutations go through `HostClient` subprocess calls
+- Worktree creation is delegated to the host via `start-implementation`, and review completion uses host-owned `agent status` / `agent tasks` commands
+- All workflow mutations go through `HostClient` subprocess calls
 
 This is enforced at test time:
 
