@@ -1,11 +1,17 @@
 """HostClient: the only gateway between the provider and spec-kitty workflow state.
 
-Every state mutation in spec-kitty is executed by calling:
-
-    spec-kitty orchestrator-api <subcommand> [args] --json
+Workflow state commands are executed via ``spec-kitty orchestrator-api``.
+Most host commands accept ``--json`` explicitly, but some
+contract-compatible builds emit the canonical JSON envelope by default and
+reject the flag. The client prefers ``--json`` and transparently retries
+without it when needed.
 
 The JSON response is parsed against the canonical envelope and validated.
 Errors are mapped to typed HostError subclasses.
+
+Subtask checkbox reconciliation still uses ``spec-kitty agent tasks
+mark-status`` because current host releases do not yet expose an
+equivalent orchestrator-api command.
 
 This module has no dependencies on the host's internal packages.
 """
@@ -33,6 +39,7 @@ from .models import (
 # The minimum contract version this provider supports
 _MIN_CONTRACT_VERSION = "1.0.0"
 _SPEC_KITTY_BIN = "spec-kitty"
+_UNSUPPORTED_JSON_FLAG = "No such option: --json"
 
 
 class HostError(Exception):
@@ -76,6 +83,10 @@ class PreflightFailedError(HostError):
     """Raised when merge-feature preflight checks fail."""
 
 
+class TaskWorkflowError(HostError):
+    """Raised when a `spec-kitty agent tasks` command fails."""
+
+
 _ERROR_CODE_MAP: dict[str, type[HostError]] = {
     "CONTRACT_VERSION_MISMATCH": ContractMismatchError,
     "FEATURE_NOT_FOUND": FeatureNotFoundError,
@@ -86,7 +97,28 @@ _ERROR_CODE_MAP: dict[str, type[HostError]] = {
     "POLICY_VALIDATION_FAILED": PolicyValidationError,
     "FEATURE_NOT_READY": FeatureNotReadyError,
     "PREFLIGHT_FAILED": PreflightFailedError,
+    "TASK_WORKFLOW_ERROR": TaskWorkflowError,
 }
+
+
+def _is_unsupported_json_response(raw_output: str) -> bool:
+    """Return True when the host rejected an explicit --json flag."""
+    if not raw_output:
+        return False
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is not False:
+        return False
+    if payload.get("error_code") != "USAGE_ERROR":
+        return False
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return False
+    return _UNSUPPORTED_JSON_FLAG in str(data.get("message", ""))
 
 
 class HostClient:
@@ -117,7 +149,7 @@ class HostClient:
     def _call(self, args: list[str]) -> HostResponse:
         """Invoke spec-kitty orchestrator-api with the given args.
 
-        Runs: spec-kitty orchestrator-api <args> --json
+        Runs: spec-kitty orchestrator-api <args> [--json]
         Parses the canonical JSON envelope.
         Raises HostError (or subclass) on success=false.
 
@@ -132,20 +164,33 @@ class HostClient:
             HostError: For any other error_code.
             RuntimeError: If subprocess fails entirely or output is not JSON.
         """
-        cmd = [self._bin, "orchestrator-api"] + args + ["--json"]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                cwd=self.repo_root,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"spec-kitty binary not found at '{self._bin}'. "
-                "Is spec-kitty installed and on PATH?"
-            ) from exc
+        def _run(include_json: bool) -> subprocess.CompletedProcess[str]:
+            cmd = [self._bin, "orchestrator-api"] + args
+            if include_json:
+                cmd.append("--json")
+            try:
+                return subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=self.repo_root,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"spec-kitty binary not found at '{self._bin}'. "
+                    "Is spec-kitty installed and on PATH?"
+                ) from exc
+
+        result = _run(include_json=True)
+        if (
+            result.returncode != 0
+            and not result.stdout.strip()
+            and _UNSUPPORTED_JSON_FLAG in result.stderr
+        ):
+            result = _run(include_json=False)
+        elif _is_unsupported_json_response(result.stdout.strip()):
+            result = _run(include_json=False)
 
         raw_output = result.stdout.strip()
         if not raw_output:
@@ -170,6 +215,72 @@ class HostClient:
             raise exc_class(error_code, message, response.data)
 
         return response
+
+    def _call_json_command(
+        self,
+        cmd: list[str],
+        *,
+        empty_output_context: str,
+        non_json_context: str,
+    ) -> dict[str, Any]:
+        """Invoke a JSON-emitting host command outside orchestrator-api."""
+        def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            try:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    cwd=self.repo_root,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"spec-kitty binary not found at '{self._bin}'. "
+                    "Is spec-kitty installed and on PATH?"
+                ) from exc
+
+        result = _run(cmd)
+        if (
+            result.returncode != 0
+            and not result.stdout.strip()
+            and _UNSUPPORTED_JSON_FLAG in result.stderr
+            and "--json" in cmd
+        ):
+            fallback_cmd = [arg for arg in cmd if arg != "--json"]
+            result = _run(fallback_cmd)
+
+        raw_output = result.stdout.strip()
+        if not raw_output:
+            raise RuntimeError(
+                f"{empty_output_context}\n"
+                f"Exit code: {result.returncode}\nstderr: {result.stderr[:500]}"
+            )
+
+        payload: dict[str, Any] | None = None
+        parse_error: Exception | None = None
+        for line in [ln.strip() for ln in raw_output.splitlines() if ln.strip()]:
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError as exc:
+                parse_error = exc
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+
+        if payload is None:
+            raise RuntimeError(
+                f"{non_json_context}\n{raw_output[:500]}"
+            ) from parse_error
+
+        if result.returncode != 0 or payload.get("error"):
+            message = str(payload.get("error", raw_output[:500]))
+            raise TaskWorkflowError(
+                "TASK_WORKFLOW_ERROR",
+                message,
+                payload,
+            )
+
+        return payload
 
     # ── Read commands ───────────────────────────────────────────────────────
 
@@ -269,6 +380,9 @@ class HostClient:
         to: str,
         note: str | None = None,
         review_ref: str | None = None,
+        evidence: dict[str, Any] | None = None,
+        subtasks_complete: bool = False,
+        implementation_evidence_present: bool = False,
     ) -> TransitionData:
         """Emit a single lane transition for a WP.
 
@@ -294,6 +408,12 @@ class HostClient:
             args += ["--policy", self.policy_json]
         if review_ref:
             args += ["--review-ref", review_ref]
+        if evidence:
+            args += ["--evidence-json", json.dumps(evidence)]
+        if subtasks_complete:
+            args.append("--subtasks-complete")
+        if implementation_evidence_present:
+            args.append("--implementation-evidence-present")
         resp = self._call(args)
         return TransitionData(**resp.data)
 
@@ -315,6 +435,54 @@ class HostClient:
             "--note", note,
         ])
         return AppendHistoryData(**resp.data)
+
+    def mark_subtasks_done(self, feature: str, task_ids: list[str]) -> None:
+        """Mark prompt-declared subtasks done in the authoritative repo branch."""
+        if not task_ids:
+            return
+
+        self._call_json_command(
+            [
+                self._bin,
+                "agent",
+                "tasks",
+                "mark-status",
+                *task_ids,
+                "--status",
+                "done",
+                "--feature",
+                feature,
+                "--auto-commit",
+                "--json",
+            ],
+            empty_output_context="spec-kitty agent tasks mark-status returned no output.",
+            non_json_context="spec-kitty agent tasks mark-status returned non-JSON output:",
+        )
+
+    def emit_status_transition(
+        self,
+        feature: str,
+        wp: str,
+        to: str,
+        *,
+        review_ref: str | None = None,
+        evidence: dict[str, Any] | None = None,
+        subtasks_complete: bool = False,
+        implementation_evidence_present: bool = False,
+    ) -> None:
+        """Emit a workflow transition through the host orchestrator API surface."""
+        try:
+            self.transition(
+                feature,
+                wp,
+                to,
+                review_ref=review_ref,
+                evidence=evidence,
+                subtasks_complete=subtasks_complete,
+                implementation_evidence_present=implementation_evidence_present,
+            )
+        except HostError as exc:
+            raise TransitionRejectedError("TRANSITION_REJECTED", str(exc), exc.raw_data) from exc
 
     def accept_feature(self, feature: str) -> AcceptFeatureData:
         """Accept a feature after all WPs are done.
