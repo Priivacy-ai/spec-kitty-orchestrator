@@ -7,7 +7,9 @@ All lane transitions go through HostClient — never direct file writes.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from enum import Enum
 
 from .agents.base import InvocationResult
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 RETRY_DELAY_SECONDS = 5
 MAX_ERROR_LENGTH = 500
+_VERDICT_PATTERN = re.compile(r"^\s*VERDICT:\s*(APPROVED|REJECTED)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 class FailureType(str, Enum):
@@ -122,6 +125,57 @@ def truncate_error(error: str) -> str:
     return error[:MAX_ERROR_LENGTH] + "..."
 
 
+def extract_text_output(result: InvocationResult) -> str:
+    """Extract human-readable assistant text from raw agent output."""
+    stdout = result.stdout.strip()
+    if not stdout:
+        return ""
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
+
+    texts: list[str] = []
+
+    if isinstance(payload, list):
+        for event in payload:
+            if not isinstance(event, dict):
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        texts.append(text)
+    elif isinstance(payload, dict):
+        for key in ("text", "message", "output"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+
+    return "\n\n".join(texts).strip() or stdout
+
+
+def extract_review_verdict(result: InvocationResult) -> str | None:
+    """Return the explicit review verdict when present."""
+    text_output = extract_text_output(result)
+    match = _VERDICT_PATTERN.search(text_output)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def is_review_approved(result: InvocationResult) -> bool:
+    """Return True only when the reviewer explicitly approved the work."""
+    return is_success(result) and extract_review_verdict(result) == "APPROVED"
+
+
 def extract_review_feedback(result: InvocationResult) -> str | None:
     """Extract actionable review feedback from the result.
 
@@ -135,9 +189,17 @@ def extract_review_feedback(result: InvocationResult) -> str | None:
     """
     if result.errors:
         return "\n".join(result.errors[:3])
-    if result.stdout.strip():
-        # Return the last ~500 chars of stdout as feedback
-        tail = result.stdout.strip()[-500:]
+    text_output = extract_text_output(result)
+    verdict = extract_review_verdict(result)
+    if verdict == "REJECTED" and text_output:
+        return text_output[-1000:]
+    if is_success(result) and verdict is None:
+        return (
+            "Reviewer did not emit the required explicit verdict line. "
+            "Expected 'VERDICT: APPROVED' or 'VERDICT: REJECTED'."
+        )
+    if text_output:
+        tail = text_output[-500:]
         return tail
     return None
 
@@ -149,6 +211,9 @@ __all__ = [
     "should_retry",
     "should_fallback",
     "truncate_error",
+    "extract_text_output",
+    "extract_review_verdict",
+    "is_review_approved",
     "extract_review_feedback",
     "RETRY_DELAY_SECONDS",
 ]

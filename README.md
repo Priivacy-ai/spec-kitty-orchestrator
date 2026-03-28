@@ -2,7 +2,7 @@
 
 External orchestrator for the [spec-kitty](https://github.com/spec-kitty/spec-kitty) workflow system.
 
-Coordinates multiple AI agents to autonomously implement and review work packages (WPs) in parallel. Integrates with spec-kitty via the versioned `orchestrator-api` CLI contract plus host-owned `agent status` / `agent tasks` commands where current host releases still require them for evidence-backed review handoff and authoritative task reconciliation.
+Coordinates multiple AI agents to autonomously implement and review work packages (WPs) in parallel. Integrates with spec-kitty via the versioned `orchestrator-api` CLI contract for workflow state and `agent tasks mark-status` for authoritative subtask checkbox reconciliation.
 
 ---
 
@@ -64,7 +64,7 @@ The orchestrator will:
 2. Claim each ready WP via the host API
 3. Spawn the implementation agent in the WP's worktree
 4. Submit to review when implementation completes
-5. Transition to `done` on review approval, or re-implement with feedback on rejection
+5. Transition to `done` only after an explicit review approval verdict, or re-implement with feedback on rejection
 6. Accept the feature when all WPs are done
 
 ---
@@ -108,7 +108,7 @@ Shows the provider-local run state (retry counts, agent choices, errors) from th
 
 ### `resume`
 
-Resumes an interrupted run from saved state. The host already tracks lane state, so the loop simply re-polls for ready WPs.
+Resumes an interrupted run from saved state. The loop re-polls ready WPs and also recovers tracked WPs stranded in `in_progress` or `for_review`.
 
 ### `abort`
 
@@ -118,10 +118,13 @@ Records the run as aborted. Use `--cleanup-worktrees` to delete the provider sta
 
 ## Configuration
 
-Optional YAML config at `.kittify/orchestrator.yaml`:
+Optional config at `.kittify/orchestrator.yaml` (preferred) or `.kittify/orchestrator.toml` (legacy):
 
 ```yaml
 max_concurrent_wps: 4
+max_retries: 2
+timeout_seconds: 3600
+single_agent_mode: false
 
 agents:
   implementation:
@@ -129,9 +132,6 @@ agents:
     - gemini
   review:
     - claude-code
-  max_retries: 2
-  timeout_seconds: 3600
-  single_agent_mode: false
 ```
 
 ---
@@ -183,8 +183,10 @@ Policy fields are validated on both sides: the provider rejects secret-like valu
 The orchestrator has **no direct access** to spec-kitty internals:
 
 - No imports from `specify_cli` or `spec_kitty_events`
-- No direct reads or writes to `kitty-specs/`
-- Worktree creation is delegated to the host via `start-implementation`, and review completion uses host-owned `agent status` / `agent tasks` commands
+- No direct writes to `kitty-specs/`
+- Worktree creation is delegated to the host via `start-implementation`
+- Workflow lane transitions use `spec-kitty orchestrator-api ...`
+- Subtask checkbox reconciliation uses `spec-kitty agent tasks mark-status ...`
 - All workflow mutations go through `HostClient` subprocess calls
 
 This is enforced at test time:

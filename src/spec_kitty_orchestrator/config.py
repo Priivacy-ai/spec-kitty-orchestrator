@@ -1,7 +1,8 @@
-"""Orchestrator configuration loaded from TOML or CLI flags.
+"""Orchestrator configuration loaded from repo config files or CLI flags.
 
-Reads from `.kittify/orchestrator.toml` (if present) and can be overridden
-by CLI flags. Uses only stdlib + pydantic; no host-internal packages.
+Reads from `.kittify/orchestrator.yaml` / `.kittify/orchestrator.yml` (preferred)
+or the legacy `.kittify/orchestrator.toml`, then applies any CLI overrides.
+Uses only stdlib + pydantic; no host-internal packages.
 
 Requires Python 3.11+ (tomllib is stdlib) or 'tomli' installed for Python 3.10.
 """
@@ -113,10 +114,143 @@ class OrchestratorConfig:
         self.state_file = kittify / "orchestrator-run-state.json"
 
 
+def _parse_scalar(value: str) -> Any:
+    """Parse a narrow YAML/TOML-like scalar into a Python value."""
+    stripped = value.strip()
+    if not stripped:
+        return ""
+
+    lower = stripped.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    if lower in {"null", "none"}:
+        return None
+    if stripped[:1] == stripped[-1:] and stripped[:1] in {'"', "'"}:
+        return stripped[1:-1]
+    if stripped.lstrip("-").isdigit():
+        return int(stripped)
+    return stripped
+
+
+def _load_yaml_config(path: Path) -> dict[str, Any]:
+    """Parse the supported orchestrator YAML subset without extra dependencies."""
+    data: dict[str, Any] = {}
+    current_section: str | None = None
+    current_nested_key: str | None = None
+
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+
+        if indent == 0:
+            current_nested_key = None
+            if stripped.endswith(":"):
+                current_section = stripped[:-1].strip()
+                data.setdefault(current_section, {})
+                continue
+
+            key, sep, value = stripped.partition(":")
+            if not sep:
+                raise RuntimeError(f"Failed to parse {path}: invalid YAML line {line_number}")
+            data[key.strip()] = _parse_scalar(value)
+            current_section = None
+            continue
+
+        if current_section is None:
+            raise RuntimeError(
+                f"Failed to parse {path}: unexpected indentation on line {line_number}"
+            )
+
+        if indent == 2:
+            key, sep, value = stripped.partition(":")
+            if not sep:
+                raise RuntimeError(f"Failed to parse {path}: invalid YAML line {line_number}")
+            section = data.setdefault(current_section, {})
+            if not isinstance(section, dict):
+                raise RuntimeError(
+                    f"Failed to parse {path}: section '{current_section}' must be a mapping"
+                )
+            if value.strip():
+                section[key.strip()] = _parse_scalar(value)
+                current_nested_key = None
+            else:
+                current_nested_key = key.strip()
+                section[current_nested_key] = []
+            continue
+
+        if indent == 4 and stripped.startswith("- "):
+            if current_nested_key is None:
+                raise RuntimeError(
+                    f"Failed to parse {path}: list item without a parent key on line {line_number}"
+                )
+            section = data.get(current_section)
+            if not isinstance(section, dict):
+                raise RuntimeError(
+                    f"Failed to parse {path}: section '{current_section}' must be a mapping"
+                )
+            values = section.get(current_nested_key)
+            if not isinstance(values, list):
+                raise RuntimeError(
+                    f"Failed to parse {path}: key '{current_nested_key}' must be a list"
+                )
+            values.append(_parse_scalar(stripped[2:]))
+            continue
+
+        raise RuntimeError(
+            f"Failed to parse {path}: unsupported YAML structure on line {line_number}"
+        )
+
+    return data
+
+
+def _load_toml_config(path: Path) -> dict[str, Any]:
+    """Load the legacy TOML configuration file."""
+    try:
+        import tomllib  # stdlib in Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Cannot parse {path}: Python 3.11+ required for tomllib, "
+                "or install 'tomli' for Python 3.10 support."
+            ) from exc
+
+    try:
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to parse {path}: {exc}") from exc
+
+
+def _load_repo_config(repo_root: Path) -> dict[str, Any]:
+    """Load orchestrator config from YAML first, then legacy TOML."""
+    kittify = repo_root / ".kittify"
+    for path in (
+        kittify / "orchestrator.yaml",
+        kittify / "orchestrator.yml",
+    ):
+        if path.exists():
+            return _load_yaml_config(path)
+
+    toml_path = kittify / "orchestrator.toml"
+    if toml_path.exists():
+        return _load_toml_config(toml_path)
+
+    return {}
+
+
 def load_config(repo_root: Path, actor: str, **overrides: Any) -> OrchestratorConfig:
     """Load OrchestratorConfig, applying any CLI overrides.
 
-    Tries to read `.kittify/orchestrator.toml` for defaults.
+    Tries `.kittify/orchestrator.yaml` / `.yml` first, then the legacy
+    `.kittify/orchestrator.toml`.
     All values can be overridden via kwargs.
 
     Args:
@@ -128,46 +262,23 @@ def load_config(repo_root: Path, actor: str, **overrides: Any) -> OrchestratorCo
         Fully resolved OrchestratorConfig.
 
     Raises:
-        RuntimeError: If orchestrator.toml exists but cannot be parsed,
-            or if no TOML parser is available on Python <3.11.
+        RuntimeError: If the repo config exists but cannot be parsed.
     """
-    toml_path = repo_root / ".kittify" / "orchestrator.toml"
-    toml_data: dict[str, Any] = {}
-
-    if toml_path.exists():
-        try:
-            import tomllib  # stdlib in Python 3.11+
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError as exc:
-                raise RuntimeError(
-                    f"Cannot parse {toml_path}: Python 3.11+ required for tomllib, "
-                    "or install 'tomli' for Python 3.10 support."
-                ) from exc
-
-        try:
-            with open(toml_path, "rb") as fh:
-                toml_data = tomllib.load(fh)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to parse {toml_path}: {exc}"
-            ) from exc
-
-    agent_cfg_data: dict[str, Any] = toml_data.get("agents", {})
+    raw_config = _load_repo_config(repo_root)
+    agent_cfg_data: dict[str, Any] = raw_config.get("agents", {})
     agent_selection = AgentSelectionConfig(
         implementation_agents=agent_cfg_data.get("implementation", ["claude-code"]),
         review_agents=agent_cfg_data.get("review", ["claude-code"]),
-        max_retries=int(agent_cfg_data.get("max_retries", 2)),
-        timeout_seconds=int(agent_cfg_data.get("timeout_seconds", 3600)),
-        single_agent_mode=bool(agent_cfg_data.get("single_agent_mode", False)),
+        max_retries=int(raw_config.get("max_retries", agent_cfg_data.get("max_retries", 2))),
+        timeout_seconds=int(raw_config.get("timeout_seconds", agent_cfg_data.get("timeout_seconds", 3600))),
+        single_agent_mode=bool(raw_config.get("single_agent_mode", agent_cfg_data.get("single_agent_mode", False))),
     )
 
     cfg = OrchestratorConfig(
         repo_root=repo_root,
         actor=actor,
         max_concurrent_wps=int(
-            overrides.get("max_concurrent_wps", toml_data.get("max_concurrent_wps", 4))
+            overrides.get("max_concurrent_wps", raw_config.get("max_concurrent_wps", 4))
         ),
         agent_selection=agent_selection,
     )

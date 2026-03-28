@@ -18,13 +18,29 @@ class QwenInvoker(BaseInvoker):
     command = "qwen"
     uses_stdin = True
 
+    _IMPLEMENTATION_SYSTEM_PROMPT = (
+        "You are operating in implementation mode. Make the requested changes in the "
+        "current workspace and leave the work commit-ready."
+    )
+    _REVIEW_SYSTEM_PROMPT = (
+        "You are operating in review mode. Review the existing workspace state only. "
+        "Do not modify files, write code, or produce an implementation summary. "
+        "Approve only when the current workspace satisfies the stated requirements; "
+        "otherwise return concrete defects with exact file paths."
+    )
+
     def build_command(self, prompt: str, working_dir: Path, role: str) -> list[str]:
-        return [
+        cmd = [
             "qwen",
             "-p",
             "--yolo",
             "--output-format", "json",
         ]
+        if role == "review":
+            cmd.extend(["--append-system-prompt", self._REVIEW_SYSTEM_PROMPT])
+        else:
+            cmd.extend(["--append-system-prompt", self._IMPLEMENTATION_SYSTEM_PROMPT])
+        return cmd
 
     def parse_output(
         self, stdout: str, stderr: str, exit_code: int, duration_seconds: float

@@ -1,12 +1,17 @@
 """HostClient: the only gateway between the provider and spec-kitty workflow state.
 
-Host commands are executed via ``spec-kitty orchestrator-api``. Most host
-commands accept ``--json`` explicitly, but some contract-compatible builds
-emit the canonical JSON envelope by default and reject the flag. The client
-prefers ``--json`` and transparently retries without it when needed.
+Workflow state commands are executed via ``spec-kitty orchestrator-api``.
+Most host commands accept ``--json`` explicitly, but some
+contract-compatible builds emit the canonical JSON envelope by default and
+reject the flag. The client prefers ``--json`` and transparently retries
+without it when needed.
 
 The JSON response is parsed against the canonical envelope and validated.
 Errors are mapped to typed HostError subclasses.
+
+Subtask checkbox reconciliation still uses ``spec-kitty agent tasks
+mark-status`` because current host releases do not yet expose an
+equivalent orchestrator-api command.
 
 This module has no dependencies on the host's internal packages.
 """
@@ -96,6 +101,26 @@ _ERROR_CODE_MAP: dict[str, type[HostError]] = {
 }
 
 
+def _is_unsupported_json_response(raw_output: str) -> bool:
+    """Return True when the host rejected an explicit --json flag."""
+    if not raw_output:
+        return False
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is not False:
+        return False
+    if payload.get("error_code") != "USAGE_ERROR":
+        return False
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return False
+    return _UNSUPPORTED_JSON_FLAG in str(data.get("message", ""))
+
+
 class HostClient:
     """Subprocess client for spec-kitty orchestrator-api.
 
@@ -163,6 +188,8 @@ class HostClient:
             and not result.stdout.strip()
             and _UNSUPPORTED_JSON_FLAG in result.stderr
         ):
+            result = _run(include_json=False)
+        elif _is_unsupported_json_response(result.stdout.strip()):
             result = _run(include_json=False)
 
         raw_output = result.stdout.strip()
@@ -353,6 +380,9 @@ class HostClient:
         to: str,
         note: str | None = None,
         review_ref: str | None = None,
+        evidence: dict[str, Any] | None = None,
+        subtasks_complete: bool = False,
+        implementation_evidence_present: bool = False,
     ) -> TransitionData:
         """Emit a single lane transition for a WP.
 
@@ -378,6 +408,12 @@ class HostClient:
             args += ["--policy", self.policy_json]
         if review_ref:
             args += ["--review-ref", review_ref]
+        if evidence:
+            args += ["--evidence-json", json.dumps(evidence)]
+        if subtasks_complete:
+            args.append("--subtasks-complete")
+        if implementation_evidence_present:
+            args.append("--implementation-evidence-present")
         resp = self._call(args)
         return TransitionData(**resp.data)
 
@@ -434,37 +470,18 @@ class HostClient:
         subtasks_complete: bool = False,
         implementation_evidence_present: bool = False,
     ) -> None:
-        """Emit a workflow transition through the host `agent status` surface."""
-        cmd = [
-            self._bin,
-            "agent",
-            "status",
-            "emit",
-            wp,
-            "--to",
-            to,
-            "--actor",
-            self.actor,
-            "--feature",
-            feature,
-            "--json",
-        ]
-        if review_ref:
-            cmd += ["--review-ref", review_ref]
-        if evidence:
-            cmd += ["--evidence-json", json.dumps(evidence)]
-        if subtasks_complete:
-            cmd.append("--subtasks-complete")
-        if implementation_evidence_present:
-            cmd.append("--implementation-evidence-present")
-
+        """Emit a workflow transition through the host orchestrator API surface."""
         try:
-            self._call_json_command(
-                cmd,
-                empty_output_context="spec-kitty agent status emit returned no output.",
-                non_json_context="spec-kitty agent status emit returned non-JSON output:",
+            self.transition(
+                feature,
+                wp,
+                to,
+                review_ref=review_ref,
+                evidence=evidence,
+                subtasks_complete=subtasks_complete,
+                implementation_evidence_present=implementation_evidence_present,
             )
-        except TaskWorkflowError as exc:
+        except HostError as exc:
             raise TransitionRejectedError("TRANSITION_REJECTED", str(exc), exc.raw_data) from exc
 
     def accept_feature(self, feature: str) -> AcceptFeatureData:
