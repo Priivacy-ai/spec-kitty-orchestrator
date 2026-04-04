@@ -16,7 +16,7 @@ migrations:
     applied_at: '2026-02-25T17:00:26.103839'
     result: skipped
     notes: Not applicable
-  - id: 2.0.0_constitution_directory
+  - id: 2.0.0_charter_directory
     applied_at: '2026-02-25T17:00:26.103914'
     result: skipped
     notes: Not applicable

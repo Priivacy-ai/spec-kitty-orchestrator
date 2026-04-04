@@ -111,16 +111,16 @@ Planning requirements (scale to complexity):
 
    **Error handling**: If the command fails with "Cannot detect feature" or "Multiple features found", verify your feature detection logic in step 2 and ensure you're passing the correct feature slug.
 
-4. **Load context**: Read FEATURE_SPEC and `.kittify/memory/constitution.md` if it exists. If the constitution file is missing, skip Constitution Check and note that it is absent. Load IMPL_PLAN template (already copied).
+4. **Load context**: Read FEATURE_SPEC and `.kittify/memory/charter.md` if it exists. If the charter file is missing, skip Charter Check and note that it is absent. Load IMPL_PLAN template (already copied).
 
 5. **Execute plan workflow**: Follow the structure in IMPL_PLAN template, using the validated planning answers as ground truth:
    - Update Technical Context with explicit statements from the user or discovery research; mark `[NEEDS CLARIFICATION: …]` only when the user deliberately postpones a decision
-   - If a constitution exists, fill Constitution Check section from it and challenge any conflicts directly with the user. If no constitution exists, mark the section as skipped.
+   - If a charter exists, fill Charter Check section from it and challenge any conflicts directly with the user. If no charter exists, mark the section as skipped.
    - Evaluate gates (ERROR if violations unjustified or questions remain unanswered)
    - Phase 0: Generate research.md (commission research to resolve every outstanding clarification)
    - Phase 1: Generate data-model.md, contracts/, quickstart.md based on confirmed intent
    - Phase 1: Update agent context by running the agent script
-   - Re-evaluate Constitution Check post-design, asking the user to resolve new gaps before proceeding
+   - Re-evaluate Charter Check post-design, asking the user to resolve new gaps before proceeding
 
 6. **STOP and report**: This command ends after Phase 1 planning. Report branch, IMPL_PLAN path, and generated artifacts.
 

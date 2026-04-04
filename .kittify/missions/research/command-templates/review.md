@@ -119,7 +119,7 @@ if source_register.exists():
 3. Load context for the selected task:
    - Read the prompt file frontmatter (lane MUST be `for_review`); note `task_id`, `phase`, `agent`, `shell_pid`.
    - Read the body sections (Objective, Context, Implementation Guidance, etc.).
-   - Consult supporting documents as referenced: constitution, plan, spec, data-model, research, quickstart, code changes.
+   - Consult supporting documents as referenced: charter, plan, spec, data-model, research, quickstart, code changes.
    - Review the associated code in the repository (diffs, tests, docs) to validate the implementation.
 
 4. Conduct the review:
