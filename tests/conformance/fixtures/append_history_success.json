@@ -6,7 +6,7 @@
   "success": true,
   "error_code": null,
   "data": {
-    "feature_slug": "099-test-feature",
+    "mission_slug": "099-test-feature",
     "wp_id": "WP01",
     "history_entry_id": "hist-deadbeef12345678"
   }

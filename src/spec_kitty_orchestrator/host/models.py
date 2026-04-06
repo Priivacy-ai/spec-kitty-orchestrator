@@ -24,7 +24,7 @@ class HostResponse(BaseModel):
 
 
 class WorkPackageInfo(BaseModel):
-    """WP info item within feature-state data."""
+    """WP info item within mission-state data."""
 
     wp_id: str
     lane: str | None
@@ -39,10 +39,10 @@ class ContractVersionData(BaseModel):
     min_supported_provider_version: str
 
 
-class FeatureStateData(BaseModel):
-    """Data returned by feature-state command."""
+class MissionStateData(BaseModel):
+    """Data returned by mission-state command."""
 
-    feature_slug: str
+    mission_slug: str
     summary: dict[str, Any]
     work_packages: list[WorkPackageInfo]
 
@@ -59,14 +59,14 @@ class ReadyWorkPackage(BaseModel):
 class ListReadyData(BaseModel):
     """Data returned by list-ready command."""
 
-    feature_slug: str
+    mission_slug: str
     ready_work_packages: list[ReadyWorkPackage]
 
 
 class StartImplData(BaseModel):
     """Data returned by start-implementation command."""
 
-    feature_slug: str
+    mission_slug: str
     wp_id: str
     from_lane: str
     to_lane: str
@@ -79,7 +79,7 @@ class StartImplData(BaseModel):
 class StartReviewData(BaseModel):
     """Data returned by start-review command."""
 
-    feature_slug: str
+    mission_slug: str
     wp_id: str
     from_lane: str
     to_lane: str
@@ -90,7 +90,7 @@ class StartReviewData(BaseModel):
 class TransitionData(BaseModel):
     """Data returned by transition command."""
 
-    feature_slug: str
+    mission_slug: str
     wp_id: str
     from_lane: str
     to_lane: str
@@ -100,24 +100,24 @@ class TransitionData(BaseModel):
 class AppendHistoryData(BaseModel):
     """Data returned by append-history command."""
 
-    feature_slug: str
+    mission_slug: str
     wp_id: str
     history_entry_id: str
 
 
-class AcceptFeatureData(BaseModel):
-    """Data returned by accept-feature command."""
+class AcceptMissionData(BaseModel):
+    """Data returned by accept-mission command."""
 
-    feature_slug: str
+    mission_slug: str
     accepted: bool
     mode: str
     accepted_at: str
 
 
 class MergeData(BaseModel):
-    """Data returned by merge-feature command."""
+    """Data returned by merge-mission command."""
 
-    feature_slug: str
+    mission_slug: str
     merged: bool
     target_branch: str
     strategy: str
@@ -129,13 +129,13 @@ __all__ = [
     "HostResponse",
     "WorkPackageInfo",
     "ContractVersionData",
-    "FeatureStateData",
+    "MissionStateData",
     "ReadyWorkPackage",
     "ListReadyData",
     "StartImplData",
     "StartReviewData",
     "TransitionData",
     "AppendHistoryData",
-    "AcceptFeatureData",
+    "AcceptMissionData",
     "MergeData",
 ]

@@ -1,0 +1,11 @@
+{
+  "contract_version": "1.0.0",
+  "command": "orchestrator-api.mission-state",
+  "timestamp": "2026-01-01T00:00:00+00:00",
+  "correlation_id": "corr-abc123def456",
+  "success": false,
+  "error_code": "MISSION_NOT_FOUND",
+  "data": {
+    "message": "Mission 'nonexistent-feature' not found in kitty-specs/"
+  }
+}

@@ -17,17 +17,17 @@ import pytest
 
 from spec_kitty_orchestrator.host.client import (
     ContractMismatchError,
-    FeatureNotFoundError,
+    MissionNotFoundError,
     HostClient,
     HostError,
     TransitionRejectedError,
     PolicyValidationError,
 )
 from spec_kitty_orchestrator.host.models import (
-    AcceptFeatureData,
+    AcceptMissionData,
     AppendHistoryData,
     ContractVersionData,
-    FeatureStateData,
+    MissionStateData,
     ListReadyData,
     MergeData,
     StartImplData,
@@ -65,7 +65,7 @@ def _patch_call(client: HostClient, fixture_name: str):
     return patch.object(client, "_call", return_value=mock_response)
 
 
-# ── Envelope shape validation ────────────────────────────────────────────────
+# -- Envelope shape validation ------------------------------------------------
 
 
 class TestEnvelopeShape:
@@ -73,17 +73,17 @@ class TestEnvelopeShape:
 
     @pytest.mark.parametrize("fixture_name", [
         "contract_version_success",
-        "feature_state_success",
+        "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
-        "accept_feature_success",
-        "merge_feature_success",
+        "accept_mission_success",
+        "merge_mission_success",
         "error_policy_required",
         "error_transition_rejected",
-        "error_feature_not_found",
+        "error_mission_not_found",
         "error_contract_mismatch",
     ])
     def test_fixture_has_required_keys(self, fixture_name: str) -> None:
@@ -104,14 +104,14 @@ class TestEnvelopeShape:
 
     @pytest.mark.parametrize("fixture_name", [
         "contract_version_success",
-        "feature_state_success",
+        "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
-        "accept_feature_success",
-        "merge_feature_success",
+        "accept_mission_success",
+        "merge_mission_success",
     ])
     def test_success_fixtures_have_correct_shape(self, fixture_name: str) -> None:
         """Success fixtures must have success=true and error_code=null."""
@@ -123,7 +123,7 @@ class TestEnvelopeShape:
     @pytest.mark.parametrize("fixture_name", [
         "error_policy_required",
         "error_transition_rejected",
-        "error_feature_not_found",
+        "error_mission_not_found",
         "error_contract_mismatch",
     ])
     def test_error_fixtures_have_correct_shape(self, fixture_name: str) -> None:
@@ -135,7 +135,7 @@ class TestEnvelopeShape:
         assert isinstance(data["data"], dict)
 
 
-# ── contract-version ─────────────────────────────────────────────────────────
+# -- contract-version ---------------------------------------------------------
 
 
 class TestContractVersion:
@@ -165,33 +165,33 @@ class TestContractVersion:
         assert exc_info.value.error_code == "CONTRACT_VERSION_MISMATCH"
 
 
-# ── feature-state ────────────────────────────────────────────────────────────
+# -- mission-state ------------------------------------------------------------
 
 
-class TestFeatureState:
+class TestMissionState:
     def test_parses_success_fixture(self) -> None:
         client = _make_client()
-        with _patch_call(client, "feature_state_success"):
-            result = client.feature_state("099-test-feature")
-        assert isinstance(result, FeatureStateData)
-        assert result.feature_slug == "099-test-feature"
+        with _patch_call(client, "mission_state_success"):
+            result = client.mission_state("099-test-feature")
+        assert isinstance(result, MissionStateData)
+        assert result.mission_slug == "099-test-feature"
         assert len(result.work_packages) == 2
         wp_ids = {wp.wp_id for wp in result.work_packages}
         assert "WP01" in wp_ids
         assert "WP02" in wp_ids
 
-    def test_feature_not_found_raises(self) -> None:
+    def test_mission_not_found_raises(self) -> None:
         client = _make_client()
-        with patch.object(client, "_call", side_effect=FeatureNotFoundError(
-            "FEATURE_NOT_FOUND",
-            "Feature 'nonexistent-feature' not found in kitty-specs/",
+        with patch.object(client, "_call", side_effect=MissionNotFoundError(
+            "MISSION_NOT_FOUND",
+            "Mission 'nonexistent-feature' not found in kitty-specs/",
         )):
-            with pytest.raises(FeatureNotFoundError) as exc_info:
-                client.feature_state("nonexistent-feature")
-        assert exc_info.value.error_code == "FEATURE_NOT_FOUND"
+            with pytest.raises(MissionNotFoundError) as exc_info:
+                client.mission_state("nonexistent-feature")
+        assert exc_info.value.error_code == "MISSION_NOT_FOUND"
 
 
-# ── list-ready ───────────────────────────────────────────────────────────────
+# -- list-ready ---------------------------------------------------------------
 
 
 class TestListReady:
@@ -200,7 +200,7 @@ class TestListReady:
         with _patch_call(client, "list_ready_success"):
             result = client.list_ready("099-test-feature")
         assert isinstance(result, ListReadyData)
-        assert result.feature_slug == "099-test-feature"
+        assert result.mission_slug == "099-test-feature"
         assert len(result.ready_work_packages) == 1
         wp = result.ready_work_packages[0]
         assert wp.wp_id == "WP01"
@@ -208,7 +208,7 @@ class TestListReady:
         assert wp.recommended_base is None
 
 
-# ── start-implementation ─────────────────────────────────────────────────────
+# -- start-implementation -----------------------------------------------------
 
 
 class TestStartImplementation:
@@ -217,7 +217,7 @@ class TestStartImplementation:
         with _patch_call(client, "start_implementation_success"):
             result = client.start_implementation("099-test-feature", "WP01")
         assert isinstance(result, StartImplData)
-        assert result.feature_slug == "099-test-feature"
+        assert result.mission_slug == "099-test-feature"
         assert result.wp_id == "WP01"
         assert result.from_lane == "planned"
         assert result.to_lane == "in_progress"
@@ -250,7 +250,7 @@ class TestStartImplementation:
         assert result.no_op is True
 
 
-# ── start-review ─────────────────────────────────────────────────────────────
+# -- start-review -------------------------------------------------------------
 
 
 class TestStartReview:
@@ -264,7 +264,7 @@ class TestStartReview:
         assert result.policy_metadata_recorded is True
 
 
-# ── transition ────────────────────────────────────────────────────────────────
+# -- transition ----------------------------------------------------------------
 
 
 class TestTransition:
@@ -287,7 +287,7 @@ class TestTransition:
         assert exc_info.value.error_code == "TRANSITION_REJECTED"
 
 
-# ── append-history ────────────────────────────────────────────────────────────
+# -- append-history ------------------------------------------------------------
 
 
 class TestAppendHistory:
@@ -300,28 +300,28 @@ class TestAppendHistory:
         assert result.history_entry_id.startswith("hist-")
 
 
-# ── accept-feature ────────────────────────────────────────────────────────────
+# -- accept-mission ------------------------------------------------------------
 
 
-class TestAcceptFeature:
+class TestAcceptMission:
     def test_parses_success_fixture(self) -> None:
         client = _make_client()
-        with _patch_call(client, "accept_feature_success"):
-            result = client.accept_feature("099-test-feature")
-        assert isinstance(result, AcceptFeatureData)
+        with _patch_call(client, "accept_mission_success"):
+            result = client.accept_mission("099-test-feature")
+        assert isinstance(result, AcceptMissionData)
         assert result.accepted is True
         assert result.mode == "auto"
         assert result.accepted_at is not None
 
 
-# ── merge-feature ─────────────────────────────────────────────────────────────
+# -- merge-mission -------------------------------------------------------------
 
 
-class TestMergeFeature:
+class TestMergeMission:
     def test_parses_success_fixture(self) -> None:
         client = _make_client()
-        with _patch_call(client, "merge_feature_success"):
-            result = client.merge_feature("099-test-feature")
+        with _patch_call(client, "merge_mission_success"):
+            result = client.merge_mission("099-test-feature")
         assert isinstance(result, MergeData)
         assert result.merged is True
         assert result.target_branch == "main"
@@ -330,9 +330,9 @@ class TestMergeFeature:
         assert "WP02" in result.merged_wps
 
     def test_merge_idempotent_replay(self) -> None:
-        """Duplicate merge-feature calls return success (replay safety)."""
+        """Duplicate merge-mission calls return success (replay safety)."""
         client = _make_client()
-        fixture = _load_fixture("merge_feature_success")
+        fixture = _load_fixture("merge_mission_success")
 
         from spec_kitty_orchestrator.host.models import HostResponse
 
@@ -345,15 +345,15 @@ class TestMergeFeature:
             return mock_resp
 
         with patch.object(client, "_call", side_effect=side_effect):
-            r1 = client.merge_feature("099-test-feature")
-            r2 = client.merge_feature("099-test-feature")
+            r1 = client.merge_mission("099-test-feature")
+            r2 = client.merge_mission("099-test-feature")
 
         assert r1.merged is True
         assert r2.merged is True
         assert call_count == 2
 
 
-# ── Error code mapping ────────────────────────────────────────────────────────
+# -- Error code mapping --------------------------------------------------------
 
 
 class TestErrorCodeMapping:
@@ -362,7 +362,7 @@ class TestErrorCodeMapping:
     @pytest.mark.parametrize("error_code,expected_cls", [
         ("POLICY_METADATA_REQUIRED", PolicyValidationError),
         ("TRANSITION_REJECTED", TransitionRejectedError),
-        ("FEATURE_NOT_FOUND", FeatureNotFoundError),
+        ("MISSION_NOT_FOUND", MissionNotFoundError),
         ("CONTRACT_VERSION_MISMATCH", ContractMismatchError),
     ])
     def test_error_code_maps_to_exception(
@@ -374,7 +374,7 @@ class TestErrorCodeMapping:
         assert _ERROR_CODE_MAP[error_code] is expected_cls
 
 
-# ── Boundary check ────────────────────────────────────────────────────────────
+# -- Boundary check ------------------------------------------------------------
 
 
 class TestBoundaryCheck:
@@ -416,7 +416,7 @@ class TestBoundaryCheck:
         )
 
 
-# ── Contract version enforcement ──────────────────────────────────────────────
+# -- Contract version enforcement ----------------------------------------------
 
 
 class TestContractVersionEnforcement:

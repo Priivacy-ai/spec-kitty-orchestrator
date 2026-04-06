@@ -32,12 +32,12 @@ class ExecutionTimeoutError(ExecutorError):
     """Raised when an agent execution exceeds the timeout."""
 
 
-def get_log_path(log_dir: Path, feature: str, wp_id: str, role: str) -> Path:
+def get_log_path(log_dir: Path, mission: str, wp_id: str, role: str) -> Path:
     """Return the log file path for a given WP execution.
 
     Args:
         log_dir: Base log directory (provider-owned).
-        feature: Feature slug.
+        mission: Mission slug.
         wp_id: Work package ID.
         role: "implementation" or "review".
 
@@ -45,7 +45,7 @@ def get_log_path(log_dir: Path, feature: str, wp_id: str, role: str) -> Path:
         Path to the log file (not yet created).
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    return log_dir / f"{feature}_{wp_id}_{role}.log"
+    return log_dir / f"{mission}_{wp_id}_{role}.log"
 
 
 async def spawn_agent(

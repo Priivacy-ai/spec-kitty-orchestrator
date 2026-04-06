@@ -1,7 +1,7 @@
 """CLI entrypoint for spec-kitty-orchestrator.
 
 Usage:
-    spec-kitty-orchestrator orchestrate --feature <slug> [options]
+    spec-kitty-orchestrator orchestrate --mission <slug> [options]
     spec-kitty-orchestrator status
     spec-kitty-orchestrator resume
     spec-kitty-orchestrator abort [--cleanup-worktrees]
@@ -62,7 +62,7 @@ def _find_repo_root() -> Path:
 
 @app.command()
 def orchestrate(
-    feature: str = typer.Option(..., "--feature", "-f", help="Feature slug to orchestrate"),
+    mission: str = typer.Option(..., "--mission", "-m", help="Mission slug to orchestrate"),
     impl_agent: Optional[str] = typer.Option(None, "--impl-agent", help="Override implementation agent"),
     review_agent: Optional[str] = typer.Option(None, "--review-agent", help="Override review agent"),
     max_concurrent: int = typer.Option(4, "--max-concurrent", help="Max concurrent WPs"),
@@ -70,7 +70,7 @@ def orchestrate(
     repo_root: Optional[str] = typer.Option(None, "--repo-root", help="Override repo root path"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate config without running"),
 ) -> None:
-    """Orchestrate all WPs for a feature through implementation and review."""
+    """Orchestrate all WPs for a mission through implementation and review."""
     root = Path(repo_root) if repo_root else _find_repo_root()
 
     cfg_overrides = {"max_concurrent_wps": max_concurrent}
@@ -107,21 +107,21 @@ def orchestrate(
 
     if dry_run:
         console.print("[green]Dry run: configuration valid.[/green]")
-        console.print(f"  Feature: {feature}")
+        console.print(f"  Mission: {mission}")
         console.print(f"  Impl agents: {cfg.agent_selection.implementation_agents}")
         console.print(f"  Review agents: {cfg.agent_selection.review_agents}")
         return
 
-    run_state = new_run_state(feature, policy)
+    run_state = new_run_state(mission, policy)
     save_state(run_state, cfg.state_file)
 
-    console.print(f"[bold green]Starting orchestration[/bold green] for feature [cyan]{feature}[/cyan]")
+    console.print(f"[bold green]Starting orchestration[/bold green] for mission [cyan]{mission}[/cyan]")
     console.print(f"  Run ID: {run_state.run_id}")
     console.print(f"  Impl agents: {cfg.agent_selection.implementation_agents}")
     console.print(f"  Max concurrent: {cfg.max_concurrent_wps}")
 
     try:
-        asyncio.run(run_orchestration_loop(feature, host, run_state, cfg))
+        asyncio.run(run_orchestration_loop(mission, host, run_state, cfg))
         console.print("[bold green]Orchestration completed successfully.[/bold green]")
     except OrchestrationError as exc:
         console.print(f"[red]Orchestration error:[/red] {exc}")
@@ -146,7 +146,7 @@ def status(
         raise typer.Exit(0)
 
     console.print(f"[bold]Run ID:[/bold] {run_state.run_id}")
-    console.print(f"[bold]Feature:[/bold] {run_state.feature_slug}")
+    console.print(f"[bold]Mission:[/bold] {run_state.mission_slug}")
     console.print(f"[bold]Started:[/bold] {run_state.started_at}")
 
     table = Table("WP", "Impl Agent", "Impl Retries", "Review Agent", "Review Retries", "Error")
@@ -176,14 +176,14 @@ def resume(
         console.print("[red]No run state found to resume.[/red]")
         raise typer.Exit(1)
 
-    console.print(f"Resuming run [cyan]{run_state.run_id}[/cyan] for feature [cyan]{run_state.feature_slug}[/cyan]")
+    console.print(f"Resuming run [cyan]{run_state.run_id}[/cyan] for mission [cyan]{run_state.mission_slug}[/cyan]")
 
     policy = run_state.policy
     cfg = load_config(root, actor)
     host = HostClient(root, actor, policy_json=policy.to_json())
 
     try:
-        asyncio.run(run_orchestration_loop(run_state.feature_slug, host, run_state, cfg))
+        asyncio.run(run_orchestration_loop(run_state.mission_slug, host, run_state, cfg))
         console.print("[bold green]Resumed orchestration completed.[/bold green]")
     except OrchestrationError as exc:
         console.print(f"[red]Orchestration error:[/red] {exc}")
