@@ -18,10 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
-    AcceptFeatureData,
+    AcceptMissionData,
     AppendHistoryData,
     ContractVersionData,
-    FeatureStateData,
+    MissionStateData,
     HostResponse,
     ListReadyData,
     MergeData,
@@ -48,8 +48,8 @@ class ContractMismatchError(HostError):
     """Raised when the host contract version is incompatible."""
 
 
-class FeatureNotFoundError(HostError):
-    """Raised when the requested feature slug does not exist."""
+class MissionNotFoundError(HostError):
+    """Raised when the requested mission slug does not exist."""
 
 
 class WPNotFoundError(HostError):
@@ -68,23 +68,23 @@ class PolicyValidationError(HostError):
     """Raised when policy JSON is invalid or contains secrets."""
 
 
-class FeatureNotReadyError(HostError):
-    """Raised when accept-feature is called before all WPs are done."""
+class MissionNotReadyError(HostError):
+    """Raised when accept-mission is called before all WPs are done."""
 
 
 class PreflightFailedError(HostError):
-    """Raised when merge-feature preflight checks fail."""
+    """Raised when merge-mission preflight checks fail."""
 
 
 _ERROR_CODE_MAP: dict[str, type[HostError]] = {
     "CONTRACT_VERSION_MISMATCH": ContractMismatchError,
-    "FEATURE_NOT_FOUND": FeatureNotFoundError,
+    "MISSION_NOT_FOUND": MissionNotFoundError,
     "WP_NOT_FOUND": WPNotFoundError,
     "TRANSITION_REJECTED": TransitionRejectedError,
     "WP_ALREADY_CLAIMED": WPAlreadyClaimedError,
     "POLICY_METADATA_REQUIRED": PolicyValidationError,
     "POLICY_VALIDATION_FAILED": PolicyValidationError,
-    "FEATURE_NOT_READY": FeatureNotReadyError,
+    "MISSION_NOT_READY": MissionNotReadyError,
     "PREFLIGHT_FAILED": PreflightFailedError,
 }
 
@@ -195,22 +195,22 @@ class HostClient:
 
         return data
 
-    def feature_state(self, feature: str) -> FeatureStateData:
-        """Return full state of a feature (all WPs, lanes, deps).
+    def mission_state(self, mission: str) -> MissionStateData:
+        """Return full state of a mission (all WPs, lanes, deps).
 
         Args:
-            feature: Feature slug (e.g. "034-my-feature").
+            mission: Mission slug (e.g. "034-my-feature").
         """
-        resp = self._call(["feature-state", "--feature", feature])
-        return FeatureStateData(**resp.data)
+        resp = self._call(["mission-state", "--mission", mission])
+        return MissionStateData(**resp.data)
 
-    def list_ready(self, feature: str) -> ListReadyData:
+    def list_ready(self, mission: str) -> ListReadyData:
         """List WPs that are ready to start (planned + all deps done).
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
         """
-        resp = self._call(["list-ready", "--feature", feature])
+        resp = self._call(["list-ready", "--mission", mission])
         return ListReadyData(**resp.data)
 
     # ── Mutation commands (require policy) ──────────────────────────────────
@@ -224,17 +224,17 @@ class HostClient:
             )
         return self.policy_json
 
-    def start_implementation(self, feature: str, wp: str) -> StartImplData:
-        """Composite transition planned→claimed→in_progress for a WP.
+    def start_implementation(self, mission: str, wp: str) -> StartImplData:
+        """Composite transition planned->claimed->in_progress for a WP.
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
             wp: Work package ID (e.g. "WP01").
         """
         policy = self._require_policy()
         resp = self._call([
             "start-implementation",
-            "--feature", feature,
+            "--mission", mission,
             "--wp", wp,
             "--actor", self.actor,
             "--policy", policy,
@@ -242,19 +242,19 @@ class HostClient:
         return StartImplData(**resp.data)
 
     def start_review(
-        self, feature: str, wp: str, review_ref: str
+        self, mission: str, wp: str, review_ref: str
     ) -> StartReviewData:
         """Transition a WP from for_review back to in_progress (review cycle).
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
             wp: Work package ID.
             review_ref: Opaque reference identifying the review feedback.
         """
         policy = self._require_policy()
         resp = self._call([
             "start-review",
-            "--feature", feature,
+            "--mission", mission,
             "--wp", wp,
             "--actor", self.actor,
             "--policy", policy,
@@ -264,7 +264,7 @@ class HostClient:
 
     def transition(
         self,
-        feature: str,
+        mission: str,
         wp: str,
         to: str,
         note: str | None = None,
@@ -275,15 +275,15 @@ class HostClient:
         Policy is attached automatically when transitioning to run-affecting lanes.
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
             wp: Work package ID.
             to: Target lane name.
             note: Optional reason/note.
-            review_ref: Optional review reference (for for_review→done).
+            review_ref: Optional review reference (for for_review->done).
         """
         args = [
             "transition",
-            "--feature", feature,
+            "--mission", mission,
             "--wp", wp,
             "--to", to,
             "--actor", self.actor,
@@ -298,40 +298,40 @@ class HostClient:
         return TransitionData(**resp.data)
 
     def append_history(
-        self, feature: str, wp: str, note: str
+        self, mission: str, wp: str, note: str
     ) -> AppendHistoryData:
         """Append a history entry to a WP prompt file.
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
             wp: Work package ID.
             note: Text of the history entry.
         """
         resp = self._call([
             "append-history",
-            "--feature", feature,
+            "--mission", mission,
             "--wp", wp,
             "--actor", self.actor,
             "--note", note,
         ])
         return AppendHistoryData(**resp.data)
 
-    def accept_feature(self, feature: str) -> AcceptFeatureData:
-        """Accept a feature after all WPs are done.
+    def accept_mission(self, mission: str) -> AcceptMissionData:
+        """Accept a mission after all WPs are done.
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
         """
         resp = self._call([
-            "accept-feature",
-            "--feature", feature,
+            "accept-mission",
+            "--mission", mission,
             "--actor", self.actor,
         ])
-        return AcceptFeatureData(**resp.data)
+        return AcceptMissionData(**resp.data)
 
-    def merge_feature(
+    def merge_mission(
         self,
-        feature: str,
+        mission: str,
         target: str = "main",
         strategy: str = "merge",
         push: bool = False,
@@ -339,14 +339,14 @@ class HostClient:
         """Run preflight checks then merge WP branches into target.
 
         Args:
-            feature: Feature slug.
+            mission: Mission slug.
             target: Target branch (default: "main").
             strategy: Merge strategy: merge | squash | rebase.
             push: Whether to push target branch after merge.
         """
         args = [
-            "merge-feature",
-            "--feature", feature,
+            "merge-mission",
+            "--mission", mission,
             "--target", target,
             "--strategy", strategy,
         ]
@@ -360,11 +360,11 @@ __all__ = [
     "HostClient",
     "HostError",
     "ContractMismatchError",
-    "FeatureNotFoundError",
+    "MissionNotFoundError",
     "WPNotFoundError",
     "TransitionRejectedError",
     "WPAlreadyClaimedError",
     "PolicyValidationError",
-    "FeatureNotReadyError",
+    "MissionNotReadyError",
     "PreflightFailedError",
 ]

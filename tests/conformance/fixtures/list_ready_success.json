@@ -6,7 +6,7 @@
   "success": true,
   "error_code": null,
   "data": {
-    "feature_slug": "099-test-feature",
+    "mission_slug": "099-test-feature",
     "ready_work_packages": [
       {
         "wp_id": "WP01",

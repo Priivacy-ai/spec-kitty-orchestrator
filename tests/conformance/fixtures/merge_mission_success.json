@@ -1,12 +1,12 @@
 {
   "contract_version": "1.0.0",
-  "command": "orchestrator-api.merge-feature",
+  "command": "orchestrator-api.merge-mission",
   "timestamp": "2026-01-01T00:00:00+00:00",
   "correlation_id": "corr-abc123def456",
   "success": true,
   "error_code": null,
   "data": {
-    "feature_slug": "099-test-feature",
+    "mission_slug": "099-test-feature",
     "merged": true,
     "target_branch": "main",
     "strategy": "merge",

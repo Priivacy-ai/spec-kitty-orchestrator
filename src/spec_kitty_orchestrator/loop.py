@@ -1,6 +1,6 @@
 """Main async orchestration loop.
 
-Polls host for ready WPs, assigns agents, executes impl → review → done cycles.
+Polls host for ready WPs, assigns agents, executes impl -> review -> done cycles.
 All host state transitions go through HostClient. Provider-local state is
 persisted via save_state after each significant event.
 """
@@ -43,7 +43,7 @@ class DeadlockError(OrchestrationError):
 
 async def execute_and_advance(
     wp_id: str,
-    feature: str,
+    mission: str,
     workspace_path: Path,
     prompt_path: Path,
     impl_agent_id: str,
@@ -53,14 +53,14 @@ async def execute_and_advance(
     cfg: OrchestratorConfig,
     concurrency: ConcurrencyManager,
 ) -> None:
-    """Execute one WP through the full impl → (review →)* done lifecycle.
+    """Execute one WP through the full impl -> (review ->)* done lifecycle.
 
     Handles retries and fallback for both implementation and review phases.
     Releases the concurrency slot when done (success or exhausted).
 
     Args:
         wp_id: Work package ID.
-        feature: Feature slug.
+        mission: Mission slug.
         workspace_path: Worktree path returned by host.start_implementation.
         prompt_path: WP markdown prompt file path.
         impl_agent_id: Selected implementation agent ID.
@@ -82,17 +82,17 @@ async def execute_and_advance(
         save_state(run_state, cfg.state_file)
         return
 
-    # ── Implementation phase ──────────────────────────────────────────────
+    # -- Implementation phase ----------------------------------------------
 
     impl_success = False
     while not impl_success:
         invoker = get_invoker(impl_agent_id)
-        log_file = get_log_path(cfg.log_dir, feature, wp_id, "implementation")
+        log_file = get_log_path(cfg.log_dir, mission, wp_id, "implementation")
         wp_exec.log_file = str(log_file)
         save_state(run_state, cfg.state_file)
 
         host.append_history(
-            feature, wp_id,
+            mission, wp_id,
             f"Starting implementation with agent '{impl_agent_id}' (retry #{wp_exec.implementation_retries})"
         )
 
@@ -106,7 +106,7 @@ async def execute_and_advance(
         if is_success(result):
             impl_success = True
             host.append_history(
-                feature, wp_id,
+                mission, wp_id,
                 f"Implementation completed successfully by '{impl_agent_id}'"
             )
             break
@@ -120,7 +120,7 @@ async def execute_and_advance(
         if should_retry(failure, wp_exec.implementation_retries, agent_cfg.max_retries):
             wp_exec.implementation_retries += 1
             save_state(run_state, cfg.state_file)
-            host.append_history(feature, wp_id, f"Retrying implementation (attempt {wp_exec.implementation_retries})")
+            host.append_history(mission, wp_id, f"Retrying implementation (attempt {wp_exec.implementation_retries})")
             await asyncio.sleep(2.0 * wp_exec.implementation_retries)
             continue
 
@@ -131,12 +131,12 @@ async def execute_and_advance(
             wp_exec.implementation_agent = impl_agent_id
             wp_exec.implementation_retries = 0
             save_state(run_state, cfg.state_file)
-            host.append_history(feature, wp_id, f"Falling back to agent '{impl_agent_id}'")
+            host.append_history(mission, wp_id, f"Falling back to agent '{impl_agent_id}'")
         except NoAgentAvailableError:
             logger.error("WP %s: all implementation agents exhausted", wp_id)
-            host.append_history(feature, wp_id, "FAILED: all implementation agents exhausted")
+            host.append_history(mission, wp_id, "FAILED: all implementation agents exhausted")
             try:
-                host.transition(feature, wp_id, "blocked", note="All implementation agents exhausted")
+                host.transition(mission, wp_id, "blocked", note="All implementation agents exhausted")
             except Exception:
                 pass
             _mark_failed(wp_exec, "All implementation agents exhausted")
@@ -145,19 +145,19 @@ async def execute_and_advance(
 
     # Transition to for_review
     try:
-        host.transition(feature, wp_id, "for_review", note=f"Implementation by '{impl_agent_id}' complete")
+        host.transition(mission, wp_id, "for_review", note=f"Implementation by '{impl_agent_id}' complete")
     except TransitionRejectedError as exc:
         logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
         _mark_failed(wp_exec, str(exc))
         save_state(run_state, cfg.state_file)
         return
 
-    # ── Review phase ──────────────────────────────────────────────────────
+    # -- Review phase ------------------------------------------------------
     # WP is in for_review. The reviewer runs while the WP *stays* in for_review.
     # Allowed transitions from for_review:
-    #   for_review → done          (reviewer approved)
-    #   for_review → in_progress   (reviewer rejected; via start_review)
-    # in_progress → done is NOT allowed, so start_review must NOT be called
+    #   for_review -> done          (reviewer approved)
+    #   for_review -> in_progress   (reviewer rejected; via start_review)
+    # in_progress -> done is NOT allowed, so start_review must NOT be called
     # before running the review agent.
 
     review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
@@ -168,11 +168,11 @@ async def execute_and_advance(
         review_cycle += 1
 
         wp_exec.review_agent = review_agent_id
-        review_log = get_log_path(cfg.log_dir, feature, wp_id, f"review-{review_cycle}")
+        review_log = get_log_path(cfg.log_dir, mission, wp_id, f"review-{review_cycle}")
         save_state(run_state, cfg.state_file)
 
         host.append_history(
-            feature, wp_id,
+            mission, wp_id,
             f"Starting review cycle {review_cycle} with '{review_agent_id}'"
         )
 
@@ -187,22 +187,22 @@ async def execute_and_advance(
         )
 
         if is_success(review_result):
-            # Approved: for_review → done  (this transition IS allowed)
+            # Approved: for_review -> done  (this transition IS allowed)
             review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
             try:
                 host.transition(
-                    feature, wp_id, "done",
+                    mission, wp_id, "done",
                     note=f"Review approved by '{review_agent_id}'",
                     review_ref=review_ref,
                 )
                 review_done = True
-                host.append_history(feature, wp_id, f"Review approved in cycle {review_cycle}")
+                host.append_history(mission, wp_id, f"Review approved in cycle {review_cycle}")
                 logger.info("WP %s completed successfully", wp_id)
             except TransitionRejectedError as exc:
                 logger.error("WP %s: done transition rejected: %s", wp_id, exc)
             break
 
-        # Rejected — extract feedback, enforce retry limit
+        # Rejected -- extract feedback, enforce retry limit
         feedback = extract_review_feedback(review_result)
         wp_exec.review_feedback = feedback
         wp_exec.review_retries += 1
@@ -210,29 +210,29 @@ async def execute_and_advance(
 
         if wp_exec.review_retries > agent_cfg.max_retries:
             logger.error("WP %s: review retry limit exceeded", wp_id)
-            host.append_history(feature, wp_id, "FAILED: review retry limit exceeded")
+            host.append_history(mission, wp_id, "FAILED: review retry limit exceeded")
             try:
-                host.transition(feature, wp_id, "blocked", note="Review cycle limit exceeded")
+                host.transition(mission, wp_id, "blocked", note="Review cycle limit exceeded")
             except Exception:
                 pass
             break
 
         feedback_ref = f"feedback-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
         host.append_history(
-            feature, wp_id,
+            mission, wp_id,
             f"Review cycle {review_cycle} rejected. Feedback: {(feedback or 'none')[:200]}"
         )
 
-        # for_review → in_progress via start_review (the right use of start_review:
+        # for_review -> in_progress via start_review (the right use of start_review:
         # triggering a re-implementation cycle after rejection)
         try:
-            host.start_review(feature, wp_id, review_ref=feedback_ref)
+            host.start_review(mission, wp_id, review_ref=feedback_ref)
         except TransitionRejectedError as exc:
             logger.error("WP %s: start-review (re-impl trigger) rejected: %s", wp_id, exc)
             break
 
         # Run re-implementation with review feedback
-        reimpl_log = get_log_path(cfg.log_dir, feature, wp_id, f"reimpl-{review_cycle}")
+        reimpl_log = get_log_path(cfg.log_dir, mission, wp_id, f"reimpl-{review_cycle}")
         reimpl_prompt = _build_rework_prompt(prompt_text, feedback)
         reimpl_result = await execute_agent(
             get_invoker(impl_agent_id),
@@ -246,17 +246,17 @@ async def execute_and_advance(
             error_msg = truncate_error(
                 "; ".join(reimpl_result.errors) if reimpl_result.errors else "rework failed"
             )
-            host.append_history(feature, wp_id, f"Re-implementation failed: {error_msg}")
+            host.append_history(mission, wp_id, f"Re-implementation failed: {error_msg}")
             try:
-                host.transition(feature, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
+                host.transition(mission, wp_id, "blocked", note=f"Re-implementation failed: {error_msg}")
             except Exception:
                 pass
             break
 
-        # in_progress → for_review (back to review queue for next cycle)
+        # in_progress -> for_review (back to review queue for next cycle)
         try:
             host.transition(
-                feature, wp_id, "for_review",
+                mission, wp_id, "for_review",
                 note=f"Re-implementation complete (cycle {review_cycle})"
             )
         except TransitionRejectedError as exc:
@@ -283,7 +283,7 @@ def _mark_failed(wp_exec: WPExecution, error: str) -> None:
 
 
 async def run_orchestration_loop(
-    feature: str,
+    mission: str,
     host: HostClient,
     run_state: RunState,
     cfg: OrchestratorConfig,
@@ -294,7 +294,7 @@ async def run_orchestration_loop(
     until all WPs are done or a deadlock is detected.
 
     Args:
-        feature: Feature slug.
+        mission: Mission slug.
         host: HostClient for all host interactions.
         run_state: Provider-local run state.
         cfg: Full orchestrator config.
@@ -304,10 +304,10 @@ async def run_orchestration_loop(
     active_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
     empty_ready_streak = 0
 
-    logger.info("Orchestration loop started for feature '%s'", feature)
+    logger.info("Orchestration loop started for mission '%s'", mission)
 
     while True:
-        ready_data = host.list_ready(feature)
+        ready_data = host.list_ready(mission)
         ready_wps = ready_data.ready_work_packages
 
         # Filter out already-active WPs
@@ -318,7 +318,7 @@ async def run_orchestration_loop(
 
         if not schedulable and concurrency.active_count() == 0:
             # Check if all WPs are done
-            state_data = host.feature_state(feature)
+            state_data = host.mission_state(mission)
             all_lanes = [wp.lane for wp in state_data.work_packages]
             terminal_lanes = {"done", "canceled", "blocked"}
             if all(lane in terminal_lanes for lane in all_lanes if lane):
@@ -353,7 +353,7 @@ async def run_orchestration_loop(
 
             # Claim the WP via host
             try:
-                impl_resp = host.start_implementation(feature, wp.wp_id)
+                impl_resp = host.start_implementation(mission, wp.wp_id)
             except WPAlreadyClaimedError:
                 logger.debug("WP %s already claimed, skipping", wp.wp_id)
                 continue
@@ -369,7 +369,7 @@ async def run_orchestration_loop(
 
             task = asyncio.create_task(
                 _run_wp_task(
-                    wp.wp_id, feature, workspace_path, prompt_path,
+                    wp.wp_id, mission, workspace_path, prompt_path,
                     impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
                 )
             )
@@ -391,12 +391,12 @@ async def run_orchestration_loop(
         await asyncio.gather(*active_tasks, return_exceptions=True)
 
     save_state(run_state, cfg.state_file)
-    logger.info("Orchestration loop completed for feature '%s'", feature)
+    logger.info("Orchestration loop completed for mission '%s'", mission)
 
 
 async def _run_wp_task(
     wp_id: str,
-    feature: str,
+    mission: str,
     workspace_path: Path,
     prompt_path: Path,
     impl_agent_id: str,
@@ -409,7 +409,7 @@ async def _run_wp_task(
     """Wrapper that releases concurrency slot after execute_and_advance."""
     try:
         await execute_and_advance(
-            wp_id, feature, workspace_path, prompt_path,
+            wp_id, mission, workspace_path, prompt_path,
             impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
         )
     finally:

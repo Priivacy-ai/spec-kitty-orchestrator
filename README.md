@@ -15,7 +15,7 @@ spec-kitty-orchestrator
         ▼
    spec-kitty (host)
         │
-        └── kitty-specs/<feature>/tasks/WP01..WPn.md
+        └── kitty-specs/<mission>/tasks/WP01..WPn.md
 ```
 
 The orchestrator polls the host for ready work packages, spawns AI agents in worktrees, and transitions each WP through `planned → claimed → in_progress → for_review → done` by calling the host API at each step. All workflow state lives in spec-kitty; the orchestrator only tracks provider-local data (retry counts, log paths, agent choices).
@@ -53,10 +53,10 @@ pip install -e ".[dev]"
 spec-kitty orchestrator-api contract-version --json
 
 # Dry-run to validate configuration
-spec-kitty-orchestrator orchestrate --feature 034-my-feature --dry-run
+spec-kitty-orchestrator orchestrate --mission 034-my-feature --dry-run
 
 # Run the orchestration loop
-spec-kitty-orchestrator orchestrate --feature 034-my-feature
+spec-kitty-orchestrator orchestrate --mission 034-my-feature
 ```
 
 The orchestrator will:
@@ -65,14 +65,14 @@ The orchestrator will:
 3. Spawn the implementation agent in the WP's worktree
 4. Submit to review when implementation completes
 5. Transition to `done` on review approval, or re-implement with feedback on rejection
-6. Accept the feature when all WPs are done
+6. Accept the mission when all WPs are done
 
 ---
 
 ## CLI reference
 
 ```
-spec-kitty-orchestrator orchestrate  --feature <slug>
+spec-kitty-orchestrator orchestrate  --mission <slug>
                                      [--impl-agent <id>]
                                      [--review-agent <id>]
                                      [--max-concurrent <n>]
@@ -91,11 +91,11 @@ spec-kitty-orchestrator abort        [--cleanup-worktrees]
 
 ### `orchestrate`
 
-Starts a new orchestration run for the named feature. Runs until all WPs reach a terminal lane (`done`, `canceled`, or `blocked`) or a dependency deadlock is detected.
+Starts a new orchestration run for the named mission. Runs until all WPs reach a terminal lane (`done`, `canceled`, or `blocked`) or a dependency deadlock is detected.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--feature` | required | Feature slug (e.g. `034-auth-system`) |
+| `--mission` | required | Mission slug (e.g. `034-auth-system`) |
 | `--impl-agent` | `claude-code` | Override implementation agent |
 | `--review-agent` | `claude-code` | Override review agent |
 | `--max-concurrent` | `4` | Max WPs in flight simultaneously |

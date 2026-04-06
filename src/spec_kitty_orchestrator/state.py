@@ -51,14 +51,14 @@ class RunState:
 
     Attributes:
         run_id: Unique identifier for this run (ULID or UUID hex).
-        feature_slug: The feature being orchestrated.
+        mission_slug: The mission being orchestrated.
         started_at: ISO-8601 UTC timestamp when the run started.
         policy: The PolicyMetadata used for this run.
         wp_executions: Per-WP provider state keyed by WP ID.
     """
 
     run_id: str
-    feature_slug: str
+    mission_slug: str
     started_at: str
     policy: PolicyMetadata
     wp_executions: dict[str, WPExecution] = field(default_factory=dict)
@@ -74,13 +74,13 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def new_run_state(feature_slug: str, policy: PolicyMetadata) -> RunState:
+def new_run_state(mission_slug: str, policy: PolicyMetadata) -> RunState:
     """Create a new RunState for a fresh orchestration run."""
     import uuid
 
     return RunState(
         run_id=uuid.uuid4().hex,
-        feature_slug=feature_slug,
+        mission_slug=mission_slug,
         started_at=_now_utc(),
         policy=policy,
     )
@@ -98,7 +98,7 @@ def save_state(state: RunState, state_file: Path) -> None:
     state_file.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
         "run_id": state.run_id,
-        "feature_slug": state.feature_slug,
+        "mission_slug": state.mission_slug,
         "started_at": state.started_at,
         "policy": asdict(state.policy),
         "wp_executions": {
@@ -138,7 +138,7 @@ def load_state(state_file: Path) -> RunState | None:
         }
         return RunState(
             run_id=data["run_id"],
-            feature_slug=data["feature_slug"],
+            mission_slug=data["mission_slug"],
             started_at=data["started_at"],
             policy=policy,
             wp_executions=wp_executions,

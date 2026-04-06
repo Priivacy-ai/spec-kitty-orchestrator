@@ -1,12 +1,12 @@
 {
   "contract_version": "1.0.0",
-  "command": "orchestrator-api.accept-feature",
+  "command": "orchestrator-api.accept-mission",
   "timestamp": "2026-01-01T00:00:00+00:00",
   "correlation_id": "corr-abc123def456",
   "success": true,
   "error_code": null,
   "data": {
-    "feature_slug": "099-test-feature",
+    "mission_slug": "099-test-feature",
     "accepted": true,
     "mode": "auto",
     "accepted_at": "2026-01-01T00:00:00+00:00"
