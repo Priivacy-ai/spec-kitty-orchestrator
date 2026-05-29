@@ -167,7 +167,7 @@ Every host mutation call includes a `PolicyMetadata` block that declares the orc
 ```python
 PolicyMetadata(
     orchestrator_id="spec-kitty-orchestrator",
-    orchestrator_version="0.1.0",
+    orchestrator_version="0.1.1",
     agent_family="claude",
     approval_mode="full_auto",   # full_auto | interactive | supervised
     sandbox_mode="workspace_write",  # workspace_write | read_only | none

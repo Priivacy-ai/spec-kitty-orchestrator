@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spec-kitty-orchestrator"
-version = "0.1.0"
+version = "0.1.1"
 description = "External orchestrator for spec-kitty, integrating via the orchestrator-api contract"
 readme = "README.md"
 requires-python = ">=3.10"
