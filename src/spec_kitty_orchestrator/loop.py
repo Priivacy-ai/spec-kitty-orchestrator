@@ -25,7 +25,13 @@ from .monitor import (
     should_retry,
     truncate_error,
 )
-from .scheduler import ConcurrencyManager, NoAgentAvailableError, select_implementer, select_reviewer
+from .scheduler import (
+    ConcurrencyManager,
+    NoAgentAvailableError,
+    select_implementer,
+    select_reviewer,
+    select_schedulable_wp_ids,
+)
 from .state import RunState, WPExecution, save_state
 
 logger = logging.getLogger(__name__)
@@ -39,7 +45,29 @@ class OrchestrationError(Exception):
 
 
 class DeadlockError(OrchestrationError):
-    """Raised when the loop detects a dependency deadlock."""
+    """Raised when the loop can make no further progress.
+
+    This covers a genuine dependency cycle, but also any WP the orchestrator
+    cannot drive forward (e.g. left in for_review/in_review by an interrupted
+    run, or one that failed and stuck in_progress). The message names each stuck
+    WP, its lane, and any recorded error so the cause is not a mystery.
+    """
+
+
+def _describe_stuck_wps(state_data, run_state, terminal_lanes) -> str:
+    """Render non-terminal WPs with their lane and any recorded last_error.
+
+    Turns an opaque "deadlock" into an actionable list, e.g.
+    ``WP01(lane=for_review), WP02(lane=planned, last_error=...)``.
+    """
+    parts: list[str] = []
+    for wp in state_data.work_packages:
+        if wp.lane in terminal_lanes:
+            continue
+        wp_exec = run_state.wp_executions.get(wp.wp_id)
+        err = f", last_error={wp_exec.last_error}" if wp_exec and wp_exec.last_error else ""
+        parts.append(f"{wp.wp_id}(lane={wp.lane}{err})")
+    return ", ".join(parts) if parts else "(none)"
 
 
 async def execute_and_advance(
@@ -537,73 +565,84 @@ async def run_orchestration_loop(
     agent_cfg = cfg.agent_selection
     active_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
     empty_ready_streak = 0
+    # WP IDs this process has already dispatched. Used so an orphaned WP that
+    # fails and sticks in_progress is not re-adopted forever — it surfaces as
+    # stalled instead.
+    driven_ids: set[str] = set()
 
     logger.info("Orchestration loop started for mission '%s'", mission)
 
     while True:
         ready_data = host.list_ready(mission)
-        ready_wps = ready_data.ready_work_packages
+        state_data = host.mission_state(mission)
 
-        # Filter out already-active WPs
-        schedulable = [
-            wp for wp in ready_wps
-            if not concurrency.is_active(wp.wp_id)
-        ]
+        # Schedulable = ready (planned, deps met) WPs plus any orphaned WPs left
+        # in a resumable lane by a prior/interrupted run. The latter is what lets
+        # an interrupted mission resume instead of falsely dead-locking.
+        schedulable_ids = select_schedulable_wp_ids(
+            ready_data.ready_work_packages,
+            state_data.work_packages,
+            concurrency.active_wp_ids(),
+            driven_ids,
+        )
 
-        if not schedulable and concurrency.active_count() == 0:
-            # Check if all WPs are done
-            state_data = host.mission_state(mission)
+        terminal_lanes = {"done", "canceled", "blocked"}
+        if not schedulable_ids and concurrency.active_count() == 0:
             all_lanes = [wp.lane for wp in state_data.work_packages]
-            terminal_lanes = {"done", "canceled", "blocked"}
             if all(lane in terminal_lanes for lane in all_lanes if lane):
                 logger.info("All WPs reached terminal state. Orchestration complete.")
                 break
 
             empty_ready_streak += 1
             if empty_ready_streak >= DEADLOCK_THRESHOLD:
-                non_terminal = [
-                    wp.wp_id for wp in state_data.work_packages
-                    if wp.lane not in terminal_lanes
-                ]
                 raise DeadlockError(
-                    f"Dependency deadlock detected. Non-terminal WPs: {non_terminal}"
+                    "Orchestration stalled: no schedulable or resumable work "
+                    "packages and nothing in flight. Stuck WPs: "
+                    + _describe_stuck_wps(state_data, run_state, terminal_lanes)
                 )
         else:
             empty_ready_streak = 0
 
-        # Schedule ready WPs
-        for wp in schedulable:
+        # Schedule ready + resumable WPs
+        for wp_id in schedulable_ids:
             if not concurrency.has_slot():
                 break
 
             try:
                 impl_agent_id = select_implementer(
                     agent_cfg,
-                    run_state.get_or_create_wp(wp.wp_id).fallback_agents_tried,
+                    run_state.get_or_create_wp(wp_id).fallback_agents_tried,
                 )
             except NoAgentAvailableError:
-                logger.warning("WP %s: no implementation agent available, skipping", wp.wp_id)
+                logger.warning("WP %s: no implementation agent available, skipping", wp_id)
                 continue
 
-            # Claim the WP via host
+            # Claim (or resume, idempotently) the WP via host
             try:
-                impl_resp = host.start_implementation(mission, wp.wp_id)
+                impl_resp = host.start_implementation(mission, wp_id)
             except WPAlreadyClaimedError:
-                logger.debug("WP %s already claimed, skipping", wp.wp_id)
+                logger.debug("WP %s already claimed by another actor, skipping", wp_id)
                 continue
             except Exception as exc:
-                logger.error("WP %s: start-implementation failed: %s", wp.wp_id, exc)
+                # Surface the real error instead of silently collapsing to a
+                # downstream "deadlock": record it so it appears in the stall
+                # report if nothing else progresses.
+                logger.error("WP %s: start-implementation failed: %s", wp_id, exc)
+                wp_exec = run_state.get_or_create_wp(wp_id)
+                wp_exec.last_error = truncate_error(str(exc))
+                save_state(run_state, cfg.state_file)
                 continue
 
             workspace_path = Path(impl_resp.workspace_path)
             prompt_path = Path(impl_resp.prompt_path)
 
-            concurrency.mark_active(wp.wp_id)
+            driven_ids.add(wp_id)
+            concurrency.mark_active(wp_id)
             await concurrency.acquire()
 
             task = asyncio.create_task(
                 _run_wp_task(
-                    wp.wp_id, mission, workspace_path, prompt_path,
+                    wp_id, mission, workspace_path, prompt_path,
                     impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
                 )
             )
