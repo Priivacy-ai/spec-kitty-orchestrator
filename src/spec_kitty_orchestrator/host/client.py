@@ -109,15 +109,13 @@ class HostClient:
         actor: str,
         policy_json: str | None = None,
         bin_path: str = _SPEC_KITTY_BIN,
-        history_repo_root: Path | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.actor = actor
         self.policy_json = policy_json
         self._bin = bin_path
-        self.history_repo_root = history_repo_root
 
-    def _call(self, args: list[str], repo_root: Path | None = None) -> HostResponse:
+    def _call(self, args: list[str]) -> HostResponse:
         """Invoke spec-kitty orchestrator-api with the given args.
 
         Runs: spec-kitty orchestrator-api <args>
@@ -136,7 +134,7 @@ class HostClient:
             RuntimeError: If subprocess fails entirely or output is not JSON.
         """
         cmd = [self._bin, "orchestrator-api"] + args
-        call_root = repo_root or self.repo_root
+        call_root = self.repo_root
         env = os.environ.copy()
         env["SPECIFY_REPO_ROOT"] = str(call_root)
         try:
@@ -341,8 +339,7 @@ class HostClient:
                 "--wp", wp,
                 "--actor", self.actor,
                 "--note", note,
-            ],
-            repo_root=self.history_repo_root,
+            ]
         )
         return AppendHistoryData(**resp.data)
 

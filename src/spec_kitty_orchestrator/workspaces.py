@@ -29,23 +29,6 @@ def _is_git_worktree(path: Path) -> bool:
     return (path / ".git").exists()
 
 
-def prepare_mission_worktree(repo_root: Path, mission: str) -> Path:
-    """Create or reuse a non-protected mission lane worktree for host mutations."""
-    worktree = repo_root / ".worktrees" / f"{mission}-orchestrator"
-    branch = f"spec-kitty/orchestrator/{mission}"
-
-    if _is_git_worktree(worktree):
-        (worktree / ".kittify").mkdir(exist_ok=True)
-        return worktree
-    if worktree.exists() and any(worktree.iterdir()):
-        raise WorkspaceError(f"Cannot use non-empty non-worktree path: {worktree}")
-
-    worktree.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(repo_root, ["worktree", "add", "-B", branch, str(worktree), "HEAD"])
-    (worktree / ".kittify").mkdir(exist_ok=True)
-    return worktree
-
-
 def prepare_wp_worktree(host_repo_root: Path, workspace_path: Path, mission: str, wp_id: str) -> Path:
     """Create or reuse the WP worktree returned by the host API."""
     workspace_path = workspace_path if workspace_path.is_absolute() else host_repo_root / workspace_path
@@ -63,6 +46,5 @@ def prepare_wp_worktree(host_repo_root: Path, workspace_path: Path, mission: str
 
 __all__ = [
     "WorkspaceError",
-    "prepare_mission_worktree",
     "prepare_wp_worktree",
 ]

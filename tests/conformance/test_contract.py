@@ -243,6 +243,34 @@ class TestHostInvocation:
         assert cmd == ["spec-kitty", "orchestrator-api", "contract-version"]
         assert "--json" not in cmd
 
+    def test_append_history_runs_from_primary_checkout(self) -> None:
+        """append-history must execute from repo_root (the primary checkout).
+
+        This is the positive form of the SAFE_COMMIT_PATH_POLICY fix: append-history
+        commits a planning artifact (a WP prompt file), and spec-kitty refuses to do
+        that from inside a worktree. So its subprocess cwd and SPECIFY_REPO_ROOT must
+        be repo_root, never a worktree path. Unlike the worktree-absence regression
+        test, this pins the behavioral contract directly, so it stays meaningful as
+        the CLI's worktree handling evolves.
+        """
+        root = Path("/tmp/primary-checkout")
+        client = _make_client(repo_root=root)
+        fixture = _load_fixture("append_history_success")
+        mock_result = MagicMock()
+        mock_result.stdout = json.dumps(fixture)
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch(
+            "spec_kitty_orchestrator.host.client.subprocess.run",
+            return_value=mock_result,
+        ) as run:
+            client.append_history("099-test-feature", "WP01", "note")
+
+        run.assert_called_once()
+        assert run.call_args.kwargs["cwd"] == root
+        assert run.call_args.kwargs["env"]["SPECIFY_REPO_ROOT"] == str(root)
+
 
 # -- start-implementation -----------------------------------------------------
 
