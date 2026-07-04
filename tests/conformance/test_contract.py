@@ -144,7 +144,7 @@ class TestContractVersion:
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
         assert isinstance(result, ContractVersionData)
-        assert result.api_version == "1.1.0"
+        assert result.api_version == "1.2.0"
         assert result.min_supported_provider_version == "0.1.0"
 
     def test_mismatch_raises_contract_mismatch_error(self) -> None:
@@ -545,7 +545,7 @@ class TestContractVersionEnforcement:
         client = _make_client()
         with _patch_call(client, "contract_version_success"):
             result = client.contract_version()
-        assert result.api_version == "1.1.0"
+        assert result.api_version == "1.2.0"
 
     def test_newer_host_version_succeeds(self) -> None:
         """If host reports a newer version (same major), no error is raised."""
@@ -554,11 +554,11 @@ class TestContractVersionEnforcement:
 
         newer_fixture = dict(fixture)
         newer_fixture["data"] = dict(fixture["data"])
-        newer_fixture["data"]["api_version"] = "1.2.0"
+        newer_fixture["data"]["api_version"] = "1.3.0"
 
         from spec_kitty_orchestrator.host.models import HostResponse
 
         with patch.object(client, "_call", return_value=HostResponse(**newer_fixture)):
             result = client.contract_version()
 
-        assert result.api_version == "1.2.0"
+        assert result.api_version == "1.3.0"

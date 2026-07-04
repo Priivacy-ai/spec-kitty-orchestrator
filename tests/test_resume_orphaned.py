@@ -61,8 +61,16 @@ class TestSelectSchedulable:
         ids = select_schedulable_wp_ids([], [_state("WP01", "in_progress")], set(), {"WP01"})
         assert ids == []
 
+    def test_orphaned_for_review_is_adopted(self) -> None:
+        # Defect 3: a for_review WP left by an interrupted run must be adopted so a
+        # reviewer is dispatched on resume (routed review-only by the loop).
+        ids = select_schedulable_wp_ids([], [_state("WP01", "for_review")], set(), set())
+        assert ids == ["WP01"]
+
     def test_non_resumable_lanes_are_ignored(self) -> None:
-        wps = [_state("WP01", "planned"), _state("WP02", "for_review"), _state("WP03", "done")]
+        # planned is surfaced via list-ready (not orphan-adopted); in_review/done are
+        # genuinely non-resumable by this orchestrator.
+        wps = [_state("WP01", "planned"), _state("WP02", "in_review"), _state("WP03", "done")]
         assert select_schedulable_wp_ids([], wps, set(), set()) == []
 
     def test_dedup_ready_and_state(self) -> None:
@@ -151,8 +159,9 @@ def test_loop_reports_stuck_wps_when_genuinely_blocked(tmp_path, monkeypatch) ->
     class StuckHost(_FakeHost):
         def __init__(self) -> None:
             super().__init__()
-            # WP01 stuck in for_review (not resumable by this orchestrator).
-            self.lanes = {"WP01": "for_review"}
+            # WP01 stuck in in_review (a genuinely non-resumable lane — the
+            # orchestrator drives claimed/in_progress/for_review, not in_review).
+            self.lanes = {"WP01": "in_review"}
 
     host = StuckHost()
     cfg = _cfg(tmp_path)
@@ -167,8 +176,52 @@ def test_loop_reports_stuck_wps_when_genuinely_blocked(tmp_path, monkeypatch) ->
         asyncio.run(run())
 
     assert "WP01" in str(exc.value)
-    assert "for_review" in str(exc.value)
-    assert host.start_impl_calls == [], "for_review WP must not be (re)started"
+    assert "in_review" in str(exc.value)
+    assert host.start_impl_calls == [], "non-resumable WP must not be (re)started"
+
+
+def test_loop_resumes_for_review_wp_via_review(tmp_path, monkeypatch) -> None:
+    """Defect 3: a WP parked in for_review by an interrupted run is adopted and
+    driven REVIEW-only on resume — resolved read-only (never start-implementation),
+    with current_lane='for_review' so execute_and_advance skips implementation."""
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+
+    class ReviewHost(_FakeHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lanes = {"WP01": "for_review"}
+            self.resolve_calls: list[str] = []
+
+        def resolve_workspace(self, mission, wp):
+            self.resolve_calls.append(wp)
+            return SimpleNamespace(
+                workspace_path="/tmp/ws", prompt_path="/tmp/p.md",
+                lane_branch=None, lane_id=None, lane_base_ref=None,
+            )
+
+    host = ReviewHost()
+    captured: dict = {}
+
+    async def fake_execute_and_advance(wp_id, mission, ws, pp, agent, h, rs, ac, cfg, conc, **kwargs):
+        captured["current_lane"] = kwargs.get("current_lane")
+        h.lanes[wp_id] = "done"  # reviewer approved
+
+    monkeypatch.setattr(loop_mod, "execute_and_advance", fake_execute_and_advance)
+
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    async def run():
+        await asyncio.wait_for(
+            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+        )
+
+    asyncio.run(run())  # must not raise DeadlockError
+
+    assert host.resolve_calls == ["WP01"], "for_review WP resolved read-only"
+    assert host.start_impl_calls == [], "must NOT start-implementation a for_review WP"
+    assert captured["current_lane"] == "for_review", "review-only dispatch"
+    assert host.lanes["WP01"] == "done"
 
 
 def test_start_implementation_failure_quarantines_wp_no_infinite_loop(

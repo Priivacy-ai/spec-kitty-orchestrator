@@ -25,9 +25,16 @@ class NoAgentAvailableError(SchedulerError):
 # Lanes whose WPs the orchestrator actively drives through execute_and_advance.
 # A WP left in one of these by a prior/interrupted run (or an out-of-band
 # start-implementation, e.g. during host-side testing) is "orphaned": list-ready
-# never returns a claimed/in_progress WP, so without adoption the loop can never
-# make progress on it and falsely reports a dependency deadlock.
-RESUMABLE_LANES = frozenset({"claimed", "in_progress"})
+# never returns a claimed/in_progress/for_review WP, so without adoption the loop
+# can never make progress on it and falsely reports a dependency deadlock.
+#
+# ``for_review`` is resumable too: a WP parked in for_review by an interrupted run
+# needs a REVIEWER dispatched on resume (not an implementer). The loop routes an
+# adopted for_review WP straight to the review phase (execute_and_advance with
+# current_lane="for_review"), so review->approve->done proceeds and dependent
+# planned WPs unblock. claimed/in_progress are re-implemented; for_review is
+# reviewed.
+RESUMABLE_LANES = frozenset({"claimed", "in_progress", "for_review"})
 
 
 def select_schedulable_wp_ids(

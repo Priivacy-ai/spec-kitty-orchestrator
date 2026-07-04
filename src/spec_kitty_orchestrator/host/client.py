@@ -26,13 +26,16 @@ from .models import (
     HostResponse,
     ListReadyData,
     MergeData,
+    ResolveWorkspaceData,
     StartImplData,
     StartReviewData,
     TransitionData,
 )
 
-# The minimum contract version this provider supports
-_MIN_CONTRACT_VERSION = "1.1.0"
+# The minimum contract version this provider supports. Bumped to 1.2.0: the loop
+# resumes for_review WPs via the read-only ``resolve-workspace`` command, which
+# the host provides only at contract >= 1.2.0.
+_MIN_CONTRACT_VERSION = "1.2.0"
 _SPEC_KITTY_BIN = "spec-kitty"
 
 
@@ -266,6 +269,24 @@ class HostClient:
             "--review-ref", review_ref,
         ])
         return StartReviewData(**resp.data)
+
+    def resolve_workspace(self, mission: str, wp: str) -> ResolveWorkspaceData:
+        """Read-only: resolve an existing WP's lane workspace + prompt + branch.
+
+        Does NOT transition the WP or touch its worktree — used to resume a WP
+        already past implementation (e.g. parked in for_review) so a reviewer can
+        run against its lane. Requires host contract >= 1.2.0.
+
+        Args:
+            mission: Mission slug.
+            wp: Work package ID.
+        """
+        resp = self._call([
+            "resolve-workspace",
+            "--mission", mission,
+            "--wp", wp,
+        ])
+        return ResolveWorkspaceData(**resp.data)
 
     def transition(
         self,

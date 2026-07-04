@@ -21,7 +21,6 @@ from .monitor import (
     classify_failure,
     extract_review_feedback,
     is_success,
-    should_fallback,
     should_retry,
     truncate_error,
 )
@@ -119,6 +118,7 @@ async def execute_and_advance(
     concurrency: ConcurrencyManager,
     *,
     lane_branch: str | None = None,
+    current_lane: str | None = None,
 ) -> None:
     """Execute one WP through the full impl -> (review ->)* done lifecycle.
 
@@ -158,8 +158,13 @@ async def execute_and_advance(
         return
 
     # -- Implementation phase ----------------------------------------------
+    # Defect 3: a WP resumed straight from for_review (by an interrupted run) is
+    # already implemented — skip the implementation loop AND the for_review
+    # transition below, and go directly to the review phase. Seeding impl_success
+    # True makes the while-loop a no-op for that case.
+    resuming_from_review = current_lane == "for_review"
 
-    impl_success = False
+    impl_success = resuming_from_review
     while not impl_success:
         invoker = get_invoker(impl_agent_id)
         log_file = get_log_path(cfg.log_dir, mission, wp_id, "implementation")
@@ -230,19 +235,20 @@ async def execute_and_advance(
             save_state(run_state, cfg.state_file)
             return
 
-    # Transition to for_review
-    try:
-        _transition_for_review(
-            host,
-            mission,
-            wp_id,
-            note=f"Implementation by '{impl_agent_id}' complete",
-        )
-    except TransitionRejectedError as exc:
-        logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
-        _mark_failed(wp_exec, str(exc))
-        save_state(run_state, cfg.state_file)
-        return
+    # Transition to for_review (skipped when resuming — the WP is already there).
+    if not resuming_from_review:
+        try:
+            _transition_for_review(
+                host,
+                mission,
+                wp_id,
+                note=f"Implementation by '{impl_agent_id}' complete",
+            )
+        except TransitionRejectedError as exc:
+            logger.warning("WP %s: for_review transition rejected: %s", wp_id, exc)
+            _mark_failed(wp_exec, str(exc))
+            save_state(run_state, cfg.state_file)
+            return
 
     # -- Review phase ------------------------------------------------------
     # Host contract drift:
@@ -648,6 +654,7 @@ async def run_orchestration_loop(
     while True:
         ready_data = host.list_ready(mission)
         state_data = host.mission_state(mission)
+        state_lanes = {wp.wp_id: wp.lane for wp in state_data.work_packages}
 
         # Schedulable = ready (planned, deps met) WPs plus any orphaned WPs left
         # in a resumable lane by a prior/interrupted run. The latter is what lets
@@ -690,31 +697,52 @@ async def run_orchestration_loop(
                 logger.warning("WP %s: no implementation agent available, skipping", wp_id)
                 continue
 
-            # Claim (or resume, idempotently) the WP via host
-            try:
-                impl_resp = host.start_implementation(mission, wp_id)
-            except WPAlreadyClaimedError:
-                logger.debug("WP %s already claimed by another actor, skipping", wp_id)
-                continue
-            except Exception as exc:
-                # Surface the real error instead of silently collapsing to a
-                # downstream "deadlock": record it so it appears in the stall
-                # report if nothing else progresses.
-                logger.error("WP %s: start-implementation failed: %s", wp_id, exc)
-                wp_exec = run_state.get_or_create_wp(wp_id)
-                wp_exec.last_error = truncate_error(str(exc))
-                save_state(run_state, cfg.state_file)
-                # Quarantine so the WP is NOT re-adopted on the next poll. An
-                # un-allocatable lane (e.g. LANE_ALLOCATION_FAILED from a stale
-                # dirty worktree) would otherwise tight-loop every poll — spawning
-                # zero agents and starving other schedulable WPs. Marking it driven
-                # surfaces it in the stall report (with last_error) instead of
-                # spinning, while sibling WPs keep getting scheduled this iteration.
-                driven_ids.add(wp_id)
-                continue
+            current_lane = state_lanes.get(wp_id)
 
-            workspace_path = Path(impl_resp.workspace_path)
-            prompt_path = Path(impl_resp.prompt_path)
+            if current_lane == "for_review":
+                # Defect 3: resume a for_review WP straight into REVIEW. Resolve its
+                # existing lane workspace READ-ONLY (start-implementation would
+                # wrongly re-transition a for_review WP); execute_and_advance skips
+                # the impl phase when current_lane == "for_review".
+                try:
+                    ws = host.resolve_workspace(mission, wp_id)
+                except Exception as exc:
+                    logger.error("WP %s: resolve-workspace failed: %s", wp_id, exc)
+                    wp_exec = run_state.get_or_create_wp(wp_id)
+                    wp_exec.last_error = truncate_error(str(exc))
+                    save_state(run_state, cfg.state_file)
+                    driven_ids.add(wp_id)  # quarantine — do not re-adopt-loop
+                    continue
+                workspace_path = Path(ws.workspace_path)
+                prompt_path = Path(ws.prompt_path)
+                lane_branch = ws.lane_branch
+            else:
+                # Claim (or resume, idempotently) the WP via host
+                try:
+                    impl_resp = host.start_implementation(mission, wp_id)
+                except WPAlreadyClaimedError:
+                    logger.debug("WP %s already claimed by another actor, skipping", wp_id)
+                    continue
+                except Exception as exc:
+                    # Surface the real error instead of silently collapsing to a
+                    # downstream "deadlock": record it so it appears in the stall
+                    # report if nothing else progresses.
+                    logger.error("WP %s: start-implementation failed: %s", wp_id, exc)
+                    wp_exec = run_state.get_or_create_wp(wp_id)
+                    wp_exec.last_error = truncate_error(str(exc))
+                    save_state(run_state, cfg.state_file)
+                    # Quarantine so the WP is NOT re-adopted on the next poll. An
+                    # un-allocatable lane (e.g. LANE_ALLOCATION_FAILED from a stale
+                    # dirty worktree) would otherwise tight-loop every poll —
+                    # spawning zero agents and starving other schedulable WPs.
+                    # Marking it driven surfaces it in the stall report (with
+                    # last_error) instead of spinning, while sibling WPs keep
+                    # getting scheduled this iteration.
+                    driven_ids.add(wp_id)
+                    continue
+                workspace_path = Path(impl_resp.workspace_path)
+                prompt_path = Path(impl_resp.prompt_path)
+                lane_branch = impl_resp.lane_branch
 
             driven_ids.add(wp_id)
             concurrency.mark_active(wp_id)
@@ -724,7 +752,8 @@ async def run_orchestration_loop(
                 _run_wp_task(
                     wp_id, mission, workspace_path, prompt_path,
                     impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
-                    lane_branch=impl_resp.lane_branch,
+                    lane_branch=lane_branch,
+                    current_lane=current_lane,
                 )
             )
             active_tasks.add(task)
@@ -761,6 +790,7 @@ async def _run_wp_task(
     concurrency: ConcurrencyManager,
     *,
     lane_branch: str | None = None,
+    current_lane: str | None = None,
 ) -> None:
     """Wrapper that releases concurrency slot after execute_and_advance."""
     try:
@@ -768,6 +798,7 @@ async def _run_wp_task(
             wp_id, mission, workspace_path, prompt_path,
             impl_agent_id, host, run_state, agent_cfg, cfg, concurrency,
             lane_branch=lane_branch,
+            current_lane=current_lane,
         )
     finally:
         concurrency.mark_idle(wp_id)
