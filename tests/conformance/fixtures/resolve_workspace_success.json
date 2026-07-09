@@ -1,6 +1,6 @@
 {
   "contract_version": "1.2.0",
-  "command": "orchestrator-api.start-implementation",
+  "command": "orchestrator-api.resolve-workspace",
   "timestamp": "2026-01-01T00:00:00+00:00",
   "correlation_id": "corr-abc123def456",
   "success": true,
@@ -8,12 +8,8 @@
   "data": {
     "mission_slug": "099-test-feature",
     "wp_id": "WP01",
-    "from_lane": "planned",
-    "to_lane": "in_progress",
     "workspace_path": "/tmp/repo/.worktrees/099-test-feature-lane-a",
     "prompt_path": "/tmp/repo/kitty-specs/099-test-feature/tasks/WP01.md",
-    "policy_metadata_recorded": true,
-    "no_op": false,
     "lane_id": "lane-a",
     "lane_branch": "kitty/mission-099-test-feature-lane-a",
     "lane_base_ref": "kitty/mission-099-test-feature"

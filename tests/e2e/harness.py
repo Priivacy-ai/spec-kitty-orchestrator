@@ -122,6 +122,7 @@ def make_base_env(bin_dir: Path, extra: dict[str, str] | None = None) -> dict[st
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["PYTHONPATH"] = f"{REPO_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env.setdefault("SPEC_KITTY_HOME", str(bin_dir.parent / ".spec-kitty-home"))
     env.setdefault("SPEC_KITTY_ENABLE_SAAS_SYNC", "0")
     if extra:
         env.update(extra)
@@ -138,6 +139,7 @@ def init_git_repo(root: Path) -> None:
 def seed_minimal_spec_kitty_project(tmp_path: Path, *, bin_dir: Path, env: dict[str, str]) -> ProjectFixture:
     root = tmp_path / "project"
     init_git_repo(root)
+    require_success(run_command(["git", "checkout", "-b", "e2e/orchestrator"], cwd=root))
     (root / ".kittify").mkdir(parents=True, exist_ok=True)
     (root / ".gitignore").write_text(".worktrees/\n.kittify/logs/\n.kittify/orchestrator-run-state.json\n", encoding="utf-8")
 
@@ -152,13 +154,26 @@ def seed_minimal_spec_kitty_project(tmp_path: Path, *, bin_dir: Path, env: dict[
                 "mission_number": 99,
                 "mission_type": "software-dev",
                 "title": "Orchestrator E2E",
+                "target_branch": "e2e/orchestrator",
             },
             indent=2,
         ),
         encoding="utf-8",
     )
-    (mission_dir / "spec.md").write_text("# Orchestrator E2E\n", encoding="utf-8")
-    (mission_dir / "tasks.md").write_text("- [ ] WP01: deterministic implementation\n", encoding="utf-8")
+    (mission_dir / "spec.md").write_text(
+        "# Orchestrator E2E\n\n"
+        "## Functional Requirements\n\n"
+        "| ID | Title | Description | Status |\n"
+        "| --- | --- | --- | --- |\n"
+        "| FR-001 | Deterministic implementation | Covered by WP01. | proposed |\n",
+        encoding="utf-8",
+    )
+    (mission_dir / "tasks.md").write_text(
+        "## WP01\n\n"
+        "**Requirement Refs**: FR-001\n\n"
+        "- [ ] Deterministic implementation\n",
+        encoding="utf-8",
+    )
     wp_path = tasks_dir / "WP01-deterministic-implementation.md"
     wp_path.write_text(
         textwrap.dedent(
@@ -168,6 +183,12 @@ def seed_minimal_spec_kitty_project(tmp_path: Path, *, bin_dir: Path, env: dict[
             title: "Deterministic implementation"
             lane: "planned"
             dependencies: []
+            requirement_refs: ["FR-001"]
+            owned_files:
+              - "src/wp01_impl.py"
+            create_intent:
+              - "src/wp01_impl.py"
+            authoritative_surface: "src/"
             agent: null
             ---
 
@@ -180,6 +201,11 @@ def seed_minimal_spec_kitty_project(tmp_path: Path, *, bin_dir: Path, env: dict[
     )
     require_success(run_command(["git", "add", "-A"], cwd=root))
     require_success(run_command(["git", "commit", "-m", "chore: seed orchestrator e2e project"], cwd=root))
+    require_success(run_command(
+        ["spec-kitty", "agent", "mission", "finalize-tasks", "--mission", mission_slug, "--json"],
+        cwd=root,
+        env=env,
+    ))
     return ProjectFixture(root=root, mission_slug=mission_slug, mission_dir=mission_dir, wp_path=wp_path, bin_dir=bin_dir, env=env)
 
 

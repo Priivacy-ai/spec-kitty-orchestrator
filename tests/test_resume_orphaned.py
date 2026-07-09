@@ -20,6 +20,7 @@ import pytest
 
 from spec_kitty_orchestrator import loop as loop_mod
 from spec_kitty_orchestrator.config import load_config
+from spec_kitty_orchestrator.host.client import WPAlreadyClaimedError
 from spec_kitty_orchestrator.loop import DeadlockError, run_orchestration_loop
 from spec_kitty_orchestrator.policy import PolicyMetadata
 from spec_kitty_orchestrator.scheduler import select_schedulable_wp_ids
@@ -59,6 +60,11 @@ class TestSelectSchedulable:
         # A WP this process already drove that failed back/stuck in_progress must
         # not be re-adopted into an infinite loop.
         ids = select_schedulable_wp_ids([], [_state("WP01", "in_progress")], set(), {"WP01"})
+        assert ids == []
+
+    def test_already_driven_ready_wp_is_not_readopted(self) -> None:
+        # A ready/planned WP whose allocation failed must also be quarantined.
+        ids = select_schedulable_wp_ids([_ready("WP01")], [], set(), {"WP01"})
         assert ids == []
 
     def test_orphaned_for_review_is_adopted(self) -> None:
@@ -256,3 +262,69 @@ def test_start_implementation_failure_quarantines_wp_no_infinite_loop(
     )
     # The stall report surfaces the offending WP (with its last_error).
     assert "WP01" in str(exc.value)
+
+
+def test_ready_start_implementation_failure_quarantines_wp_no_infinite_loop(
+    tmp_path, monkeypatch
+) -> None:
+    """A planned/ready WP whose start-implementation fails must be quarantined too.
+
+    Regression: driven_ids was applied only to orphaned state WPs, so list-ready
+    reselected the failed planned WP forever and the loop never reached stall
+    reporting.
+    """
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(loop_mod, "DEADLOCK_THRESHOLD", 2)
+
+    class ReadyFailingHost(_FakeHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lanes = {"WP01": "planned"}
+
+        def list_ready(self, mission):
+            return SimpleNamespace(ready_work_packages=[_ready("WP01")])
+
+        def start_implementation(self, mission, wp):
+            self.start_impl_calls.append(wp)
+            raise RuntimeError("[LANE_ALLOCATION_FAILED] lane worktree has uncommitted changes")
+
+    host = ReadyFailingHost()
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    async def run():
+        await asyncio.wait_for(
+            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+        )
+
+    with pytest.raises(DeadlockError) as exc:
+        asyncio.run(run())
+
+    assert host.start_impl_calls == ["WP01"]
+    assert "WP01" in str(exc.value)
+
+
+def test_already_claimed_wp_quarantines_no_infinite_loop(tmp_path, monkeypatch) -> None:
+    """A WP claimed by another actor should surface as stalled, not poll forever."""
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(loop_mod, "DEADLOCK_THRESHOLD", 2)
+
+    class ClaimedHost(_FakeHost):
+        def start_implementation(self, mission, wp):
+            self.start_impl_calls.append(wp)
+            raise WPAlreadyClaimedError("WP_ALREADY_CLAIMED", "claimed by other-actor")
+
+    host = ClaimedHost()
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    async def run():
+        await asyncio.wait_for(
+            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+        )
+
+    with pytest.raises(DeadlockError) as exc:
+        asyncio.run(run())
+
+    assert host.start_impl_calls == ["WP01"]
+    assert "claimed by other-actor" in str(exc.value)

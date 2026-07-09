@@ -147,7 +147,7 @@ async def execute_and_advance(
     # Lane tip before any of this WP's work runs. Output is measured against this
     # (NOT the mission base) so dependency-lane merges already applied when the
     # worktree was allocated are not miscounted as this WP's implementation.
-    impl_base = current_lane_head(workspace_path) if lane_branch else None
+    output_base = current_lane_head(workspace_path) if lane_branch else None
 
     try:
         prompt_text = prompt_path.read_text(encoding="utf-8")
@@ -186,7 +186,7 @@ async def execute_and_advance(
 
         if is_success(result):
             committed, commit_err = _commit_implementation(
-                workspace_path, wp_id, impl_agent_id, lane_branch, impl_base
+                workspace_path, wp_id, impl_agent_id, lane_branch, output_base
             )
             if not committed:
                 # Agent exited 0 but produced no committable output (or the
@@ -201,6 +201,7 @@ async def execute_and_advance(
                 mission, wp_id,
                 f"Implementation committed and completed by '{impl_agent_id}'"
             )
+            output_base = current_lane_head(workspace_path) if lane_branch else output_base
             break
 
         # Implementation failed
@@ -251,10 +252,8 @@ async def execute_and_advance(
             return
 
     # -- Review phase ------------------------------------------------------
-    # Host contract drift:
-    # - legacy start-review means rejection/rework and returns in_progress
-    # - current start-review means reviewer claim and returns in_review
-    # Run review from for_review for compatibility, then adapt transitions.
+    # Contract >= 1.2.0: claim the review lane before executing the reviewer so
+    # the host records review ownership (for_review -> in_review).
 
     review_agent_id = select_reviewer(agent_cfg, impl_agent_id, [])
     review_cycle = 0
@@ -272,7 +271,21 @@ async def execute_and_advance(
             f"Starting review cycle {review_cycle} with '{review_agent_id}'"
         )
 
-        # Run review while WP remains in for_review
+        review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
+        try:
+            start_review = host.start_review(mission, wp_id, review_ref=review_ref)
+            if start_review.to_lane != "in_review":
+                raise TransitionRejectedError(
+                    "TRANSITION_REJECTED",
+                    f"start-review returned unsupported lane '{start_review.to_lane}'",
+                )
+        except (TransitionRejectedError, WPAlreadyClaimedError) as exc:
+            logger.error("WP %s: start-review failed: %s", wp_id, exc)
+            _mark_failed(wp_exec, str(exc))
+            save_state(run_state, cfg.state_file)
+            return
+
+        # Run review while the WP is owned by the review lane.
         review_result = await execute_agent(
             get_invoker(review_agent_id),
             prompt_text,
@@ -284,7 +297,6 @@ async def execute_and_advance(
         )
 
         if is_success(review_result):
-            review_ref = f"review-{wp_id}-cycle{review_cycle}-{uuid.uuid4().hex[:8]}"
             try:
                 _transition_review_approved(
                     host,
@@ -367,7 +379,7 @@ async def execute_and_advance(
 
         # Commit the rework output before re-review (same gate as first impl).
         committed, commit_err = _commit_implementation(
-            workspace_path, wp_id, impl_agent_id, lane_branch, impl_base
+            workspace_path, wp_id, impl_agent_id, lane_branch, output_base
         )
         if not committed:
             host.append_history(mission, wp_id, f"Re-implementation not accepted: {commit_err}")
@@ -380,6 +392,7 @@ async def execute_and_advance(
             except Exception:
                 pass
             break
+        output_base = current_lane_head(workspace_path) if lane_branch else output_base
 
         # in_progress -> for_review (back to review queue for next cycle)
         try:
@@ -547,47 +560,16 @@ def _transition_review_approved(
     review_cycle: int,
     review_ref: str,
 ) -> None:
-    """Mark a reviewed WP done across legacy and in_review host contracts."""
+    """Mark a reviewed WP done after start-review claimed in_review."""
     note = f"Review approved by '{review_agent_id}'"
-    try:
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "done",
-            note=note,
-            review_ref=review_ref,
-        )
-        return
-    except TransitionRejectedError as first_error:
-        logger.info(
-            "WP %s: legacy done transition rejected, claiming review lane: %s",
-            wp_id,
-            first_error,
-        )
-
-    start_result = host.start_review(mission, wp_id, review_ref=review_ref)
-    if start_result.to_lane == "in_review":
-        _host_transition(
-            host,
-            mission,
-            wp_id,
-            "done",
-            note=note,
-            review_ref=review_ref,
-            force=True,
-        )
-        return
-
-    if start_result.to_lane == "in_progress":
-        raise TransitionRejectedError(
-            "TRANSITION_REJECTED",
-            f"start-review returned legacy rework lane during approval cycle {review_cycle}",
-        )
-
-    raise TransitionRejectedError(
-        "TRANSITION_REJECTED",
-        f"start-review returned unsupported lane '{start_result.to_lane}'",
+    _host_transition(
+        host,
+        mission,
+        wp_id,
+        "done",
+        note=note,
+        review_ref=review_ref,
+        force=True,
     )
 
 
@@ -597,11 +579,17 @@ def _transition_review_rejected(
     wp_id: str,
     feedback_ref: str,
 ) -> None:
-    """Move a rejected WP back to in_progress across review lane contracts."""
-    start_result = host.start_review(mission, wp_id, review_ref=feedback_ref)
-    if start_result.to_lane == "in_progress":
-        return
-    if start_result.to_lane == "in_review":
+    """Move a rejected WP from in_review back to in_progress for rework."""
+    try:
+        _host_transition(
+            host,
+            mission,
+            wp_id,
+            "in_progress",
+            note="Review rejected; rework required",
+            review_ref=feedback_ref,
+        )
+    except TransitionRejectedError:
         _host_transition(
             host,
             mission,
@@ -611,11 +599,6 @@ def _transition_review_rejected(
             review_ref=feedback_ref,
             force=True,
         )
-        return
-    raise TransitionRejectedError(
-        "TRANSITION_REJECTED",
-        f"start-review returned unsupported lane '{start_result.to_lane}'",
-    )
 
 
 def _mark_failed(wp_exec: WPExecution, error: str) -> None:
@@ -720,8 +703,12 @@ async def run_orchestration_loop(
                 # Claim (or resume, idempotently) the WP via host
                 try:
                     impl_resp = host.start_implementation(mission, wp_id)
-                except WPAlreadyClaimedError:
+                except WPAlreadyClaimedError as exc:
                     logger.debug("WP %s already claimed by another actor, skipping", wp_id)
+                    wp_exec = run_state.get_or_create_wp(wp_id)
+                    wp_exec.last_error = truncate_error(str(exc))
+                    save_state(run_state, cfg.state_file)
+                    driven_ids.add(wp_id)
                     continue
                 except Exception as exc:
                     # Surface the real error instead of silently collapsing to a

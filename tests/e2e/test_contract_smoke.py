@@ -26,7 +26,12 @@ def test_spec_kitty_orchestrator_api_is_json_without_json_flag(fake_agent_projec
 
 
 def test_host_client_contract_version_works_against_real_spec_kitty(fake_agent_project) -> None:
-    client = HostClient(repo_root=fake_agent_project.root, actor="e2e", policy_json=None)
+    client = HostClient(
+        repo_root=fake_agent_project.root,
+        actor="e2e",
+        policy_json=None,
+        bin_path=str(fake_agent_project.bin_dir / "spec-kitty"),
+    )
 
     data = client.contract_version()
 
@@ -36,7 +41,12 @@ def test_host_client_contract_version_works_against_real_spec_kitty(fake_agent_p
 
 
 def test_host_client_can_query_seeded_ready_wp(fake_agent_project) -> None:
-    client = HostClient(repo_root=fake_agent_project.root, actor="e2e", policy_json=None)
+    client = HostClient(
+        repo_root=fake_agent_project.root,
+        actor="e2e",
+        policy_json=None,
+        bin_path=str(fake_agent_project.bin_dir / "spec-kitty"),
+    )
 
     state = client.mission_state(fake_agent_project.mission_slug)
     ready = client.list_ready(fake_agent_project.mission_slug)

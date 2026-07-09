@@ -155,6 +155,7 @@ __all__ = [
     "MissionStateData",
     "ReadyWorkPackage",
     "ListReadyData",
+    "ResolveWorkspaceData",
     "StartImplData",
     "StartReviewData",
     "TransitionData",

@@ -213,3 +213,69 @@ def test_commit_fires_when_implementation_succeeds_on_retry(tmp_path: Path, monk
 
     assert commit_calls, "retry-success must still commit the lane work"
     assert "WP02" in commit_calls[0]
+
+
+def test_reimplementation_noop_is_not_counted_as_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rejected WP must prove each reimplementation produced new output.
+
+    Regression: the rework gate reused the pre-implementation base, so the first
+    implementation commit made a later no-op reimplementation look non-empty.
+    """
+    prompt = tmp_path / "WP03.md"
+    prompt.write_text("# WP03\n", encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    results = iter([
+        SimpleNamespace(exit_code=0, errors=[]),  # initial implementation
+        SimpleNamespace(exit_code=1, errors=["needs changes"]),  # review rejects
+        SimpleNamespace(exit_code=0, errors=[]),  # no-op reimplementation
+    ])
+
+    async def fake_execute_agent(*a, **k):
+        return next(results)
+
+    heads = iter(["base0", "head1"])
+
+    def fake_head(_workspace_path):
+        return next(heads, "head1")
+
+    commit_bases: list[str | None] = []
+
+    def fake_commit(workspace_path, message, *, lane_branch, output_base):
+        commit_bases.append(output_base)
+        if len(commit_bases) == 1:
+            return True
+        # No-op rework: old code passed base0 and falsely counted the initial
+        # implementation commit as rework output; fixed code passes head1.
+        return output_base == "base0"
+
+    transitions: list[str] = []
+
+    def fake_transition(mission, wp, to, **kwargs):
+        transitions.append(to)
+        return SimpleNamespace(to_lane=to)
+
+    host = SimpleNamespace(
+        repo_root=tmp_path,
+        append_history=lambda *a, **k: None,
+        transition=fake_transition,
+        start_review=lambda *a, **k: SimpleNamespace(to_lane="in_review"),
+    )
+
+    monkeypatch.setattr(loop_mod, "execute_agent", fake_execute_agent)
+    monkeypatch.setattr(loop_mod, "is_success", lambda r: r.exit_code == 0)
+    monkeypatch.setattr(loop_mod, "extract_review_feedback", lambda r: "change requested")
+    monkeypatch.setattr(loop_mod, "current_lane_head", fake_head)
+    monkeypatch.setattr(loop_mod, "commit_lane_work", fake_commit)
+
+    asyncio.run(execute_and_advance(
+        "WP03", "m", tmp_path, prompt, "claude-code",
+        host, run_state, cfg.agent_selection, cfg, ConcurrencyManager(1),
+        lane_branch="lane-c",
+    ))
+
+    assert commit_bases == ["base0", "head1"]
+    assert transitions == ["for_review", "in_progress", "blocked"]

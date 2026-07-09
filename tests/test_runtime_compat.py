@@ -81,46 +81,70 @@ class ReviewLaneHost:
                 "TRANSITION_REJECTED",
                 "for_review cannot go directly to done",
             )
-        if (
-            to in {"done", "in_progress"}
-            and self.lane == "in_review"
-            and not kwargs.get("force")
-        ):
-            raise TransitionRejectedError(
-                "TRANSITION_REJECTED",
-                "in_review requires review_result",
-            )
         self.lane = to
         return SimpleNamespace(to_lane=to)
 
 
-def test_review_approval_claims_in_review_then_forces_done_when_host_requires_review_result() -> None:
-    host = ReviewLaneHost()
+def test_review_approval_moves_current_in_review_lane_to_done() -> None:
+    host = ReviewLaneHost(lane="in_review")
 
     _transition_review_approved(host, "099-feature", "WP01", "codex", 1, "review-ref")
 
     assert host.lane == "done"
-    assert host.calls[0][0:2] == ("transition", "done")
-    assert host.calls[1][0] == "start_review"
-    assert host.calls[2] == (
-        "transition",
-        "done",
-        {
-            "note": "Review approved by 'codex'",
-            "review_ref": "review-ref",
-            "force": True,
-        },
-    )
+    assert host.calls == [
+        (
+            "transition",
+            "done",
+            {
+                "note": "Review approved by 'codex'",
+                "review_ref": "review-ref",
+                "force": True,
+            },
+        )
+    ]
 
 
 def test_review_rejection_moves_current_in_review_lane_back_to_in_progress() -> None:
-    host = ReviewLaneHost()
+    host = ReviewLaneHost(lane="in_review")
 
     _transition_review_rejected(host, "099-feature", "WP01", "feedback-ref")
 
     assert host.lane == "in_progress"
     assert host.calls == [
-        ("start_review", "feedback-ref", {}),
+        (
+            "transition",
+            "in_progress",
+            {
+                "note": "Review rejected; rework required",
+                "review_ref": "feedback-ref",
+            },
+        ),
+    ]
+
+
+def test_review_rejection_retries_with_force_when_strict_guards_reject() -> None:
+    class StrictReviewHost(ReviewLaneHost):
+        def transition(self, mission: str, wp_id: str, to: str, **kwargs: Any) -> SimpleNamespace:
+            self.calls.append(("transition", to, kwargs))
+            if to == "in_progress" and not kwargs.get("force"):
+                raise TransitionRejectedError("TRANSITION_REJECTED", "strict rework guard")
+            self.lane = to
+            return SimpleNamespace(to_lane=to)
+
+    host = StrictReviewHost(lane="in_review")
+
+    _transition_review_rejected(host, "099-feature", "WP01", "feedback-ref")
+
+    assert host.lane == "in_progress"
+    assert host.calls == [
+        (
+            "transition",
+            "in_progress",
+            {
+                "note": "Review rejected; rework required",
+                "review_ref": "feedback-ref",
+            },
+        ),
         (
             "transition",
             "in_progress",
@@ -130,6 +154,24 @@ def test_review_rejection_moves_current_in_review_lane_back_to_in_progress() -> 
                 "force": True,
             },
         ),
+    ]
+
+
+def test_review_approval_does_not_claim_review_again() -> None:
+    host = ReviewLaneHost(lane="in_review")
+
+    _transition_review_approved(host, "099-feature", "WP01", "codex", 1, "review-ref")
+
+    assert host.calls == [
+        (
+            "transition",
+            "done",
+            {
+                "note": "Review approved by 'codex'",
+                "review_ref": "review-ref",
+                "force": True,
+            },
+        )
     ]
 
 

@@ -25,7 +25,7 @@ The orchestrator polls the host for ready work packages, spawns AI agents in wor
 ## Requirements
 
 - Python 3.10+
-- [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) ≥ 2.x installed and on PATH (provides the `orchestrator-api` contract)
+- [spec-kitty](https://github.com/Priivacy-ai/spec-kitty) installed and on PATH with `orchestrator-api` contract ≥ 1.2.0
 - At least one supported AI agent CLI installed (see [Supported agents](#supported-agents))
 
 ---
@@ -170,7 +170,7 @@ Every host mutation call includes a `PolicyMetadata` block that declares the orc
 ```python
 PolicyMetadata(
     orchestrator_id="spec-kitty-orchestrator",
-    orchestrator_version="0.1.2",
+    orchestrator_version="0.1.3",
     agent_family="claude",
     approval_mode="full_auto",   # full_auto | interactive | supervised
     sandbox_mode="workspace_write",  # workspace_write | read_only | none

@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.1.0",
+  "contract_version": "1.2.0",
   "command": "orchestrator-api.start-review",
   "timestamp": "2026-01-01T00:00:00+00:00",
   "correlation_id": "corr-abc123def456",
@@ -9,7 +9,7 @@
     "mission_slug": "099-test-feature",
     "wp_id": "WP01",
     "from_lane": "for_review",
-    "to_lane": "in_progress",
+    "to_lane": "in_review",
     "prompt_path": "/tmp/repo/kitty-specs/099-test-feature/tasks/WP01.md",
     "policy_metadata_recorded": true
   }

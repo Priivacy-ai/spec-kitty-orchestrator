@@ -3,7 +3,7 @@
 Validates that HostClient correctly parses all canonical fixture responses
 and maps them to the right typed data models and exceptions.
 
-The 13 fixture JSON files are the source of truth for the contract shape.
+    The fixture JSON files are the source of truth for the contract shape.
 Both sides of the contract (host and provider) must conform to these fixtures.
 """
 
@@ -30,6 +30,7 @@ from spec_kitty_orchestrator.host.models import (
     MissionStateData,
     ListReadyData,
     MergeData,
+    ResolveWorkspaceData,
     StartImplData,
     StartReviewData,
     TransitionData,
@@ -76,6 +77,7 @@ class TestEnvelopeShape:
         "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
+        "resolve_workspace_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
@@ -107,6 +109,7 @@ class TestEnvelopeShape:
         "mission_state_success",
         "list_ready_success",
         "start_implementation_success",
+        "resolve_workspace_success",
         "start_review_success",
         "transition_success",
         "append_history_success",
@@ -358,8 +361,26 @@ class TestStartReview:
             result = client.start_review("099-test-feature", "WP01", review_ref="review-001")
         assert isinstance(result, StartReviewData)
         assert result.from_lane == "for_review"
-        assert result.to_lane == "in_progress"
+        assert result.to_lane == "in_review"
         assert result.policy_metadata_recorded is True
+
+
+# -- resolve-workspace -------------------------------------------------------
+
+
+class TestResolveWorkspace:
+    def test_parses_success_fixture(self) -> None:
+        client = _make_client()
+        with _patch_call(client, "resolve_workspace_success"):
+            result = client.resolve_workspace("099-test-feature", "WP01")
+        assert isinstance(result, ResolveWorkspaceData)
+        assert result.mission_slug == "099-test-feature"
+        assert result.wp_id == "WP01"
+        assert result.workspace_path.endswith("lane-a")
+        assert result.prompt_path.endswith("WP01.md")
+        assert result.lane_id == "lane-a"
+        assert result.lane_branch == "kitty/mission-099-test-feature-lane-a"
+        assert result.lane_base_ref == "kitty/mission-099-test-feature"
 
 
 # -- transition ----------------------------------------------------------------

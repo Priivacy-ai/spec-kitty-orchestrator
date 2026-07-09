@@ -51,10 +51,10 @@ def select_schedulable_wp_ids(
       prior/interrupted run, which list-ready never surfaces. Adopting these is
       what lets an interrupted mission resume instead of dead-locking.
 
-    Excludes WPs already active in this process (``active_ids``). Orphan adoption
-    additionally excludes WPs this process has already driven (``driven_ids``) so
-    a WP that failed and stuck in_progress is not re-adopted into an infinite
-    loop — it is surfaced as stalled instead.
+    Excludes WPs already active in this process (``active_ids``), and WPs this
+    process has already driven (``driven_ids``) so a WP whose allocation or run
+    failed is not re-adopted into an infinite loop — it is surfaced as stalled
+    instead.
 
     Order: ready WPs first (in list-ready order), then orphaned resumables;
     de-duplicated.
@@ -62,7 +62,11 @@ def select_schedulable_wp_ids(
     ordered: list[str] = []
     seen: set[str] = set()
     for wp in ready_wps:
-        if wp.wp_id not in seen and wp.wp_id not in active_ids:
+        if (
+            wp.wp_id not in seen
+            and wp.wp_id not in active_ids
+            and wp.wp_id not in driven_ids
+        ):
             ordered.append(wp.wp_id)
             seen.add(wp.wp_id)
     for wp in state_wps:
