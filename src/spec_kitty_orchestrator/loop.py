@@ -634,6 +634,38 @@ def _mark_failed(wp_exec: WPExecution, error: str) -> None:
     wp_exec.last_error = error[:500]
 
 
+def _recover_orphaned_reviews(host: HostClient, mission: str) -> None:
+    """Force any in_review WPs back to for_review on startup.
+
+    When the orchestrator is killed while a reviewer is in-flight, the WP is
+    left in in_review with no live agent. The scheduler never adopts in_review
+    (it is not in RESUMABLE_LANES), so a naive restart stalls immediately.
+
+    This runs once, before the main loop, and transitions each in_review WP
+    back to for_review under force so the existing for_review orphan-adoption
+    path can re-dispatch a fresh reviewer.
+    """
+    state_data = host.mission_state(mission)
+    for wp in state_data.work_packages:
+        if wp.lane != "in_review":
+            continue
+        logger.warning(
+            "WP %s is in_review with no active agent — forcing back to for_review for re-review",
+            wp.wp_id,
+        )
+        try:
+            _host_transition(
+                host,
+                mission,
+                wp.wp_id,
+                "for_review",
+                force=True,
+                note="reviewer agent interrupted when orchestrator was killed; re-queuing for review",
+            )
+        except Exception as exc:
+            logger.error("WP %s: could not recover from in_review: %s", wp.wp_id, exc)
+
+
 async def run_orchestration_loop(
     mission: str,
     host: HostClient,
@@ -661,6 +693,7 @@ async def run_orchestration_loop(
     driven_ids: set[str] = set()
 
     logger.info("Orchestration loop started for mission '%s'", mission)
+    _recover_orphaned_reviews(host, mission)
 
     while True:
         ready_data = host.list_ready(mission)

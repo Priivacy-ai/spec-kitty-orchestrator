@@ -74,9 +74,10 @@ class TestSelectSchedulable:
         assert ids == ["WP01"]
 
     def test_non_resumable_lanes_are_ignored(self) -> None:
-        # planned is surfaced via list-ready (not orphan-adopted); in_review/done are
-        # genuinely non-resumable by this orchestrator.
-        wps = [_state("WP01", "planned"), _state("WP02", "in_review"), _state("WP03", "done")]
+        # planned is surfaced via list-ready (not orphan-adopted); blocked/done are
+        # genuinely non-resumable by the scheduler. in_review is recovered to
+        # for_review by _recover_orphaned_reviews before the scheduler runs.
+        wps = [_state("WP01", "planned"), _state("WP02", "blocked"), _state("WP03", "done")]
         assert select_schedulable_wp_ids([], wps, set(), set()) == []
 
     def test_dedup_ready_and_state(self) -> None:
@@ -165,9 +166,11 @@ def test_loop_reports_stuck_wps_when_genuinely_blocked(tmp_path, monkeypatch) ->
     class StuckHost(_FakeHost):
         def __init__(self) -> None:
             super().__init__()
-            # WP01 stuck in in_review (a genuinely non-resumable lane — the
-            # orchestrator drives claimed/in_progress/for_review, not in_review).
-            self.lanes = {"WP01": "in_review"}
+            # WP01 stuck in approved — non-resumable (not in RESUMABLE_LANES) and
+            # non-terminal (not in terminal_lanes), so the loop cannot make progress.
+            # The orchestrator drives in_review -> done directly; a WP stranded in
+            # approved represents a state the orchestrator cannot recover from.
+            self.lanes = {"WP01": "approved"}
 
     host = StuckHost()
     cfg = _cfg(tmp_path)
@@ -182,7 +185,7 @@ def test_loop_reports_stuck_wps_when_genuinely_blocked(tmp_path, monkeypatch) ->
         asyncio.run(run())
 
     assert "WP01" in str(exc.value)
-    assert "in_review" in str(exc.value)
+    assert "approved" in str(exc.value)
     assert host.start_impl_calls == [], "non-resumable WP must not be (re)started"
 
 
@@ -302,6 +305,65 @@ def test_ready_start_implementation_failure_quarantines_wp_no_infinite_loop(
 
     assert host.start_impl_calls == ["WP01"]
     assert "WP01" in str(exc.value)
+
+
+def test_loop_recovers_in_review_wp_on_restart(tmp_path, monkeypatch) -> None:
+    """Fix for #28: a WP stuck in in_review (reviewer killed mid-flight) must be
+    force-transitioned back to for_review on startup so a fresh reviewer is
+    dispatched, rather than stalling immediately with a deadlock error."""
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+
+    class InReviewHost(_FakeHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lanes = {"WP01": "in_review"}
+            self.transition_calls: list[tuple] = []
+            self.resolve_calls: list[str] = []
+            self.append_history_calls: list = []
+
+        def transition(self, mission, wp, to, *, note=None, force=False, **_kwargs):
+            self.transition_calls.append((wp, to, force))
+            self.lanes[wp] = to
+
+        def resolve_workspace(self, mission, wp):
+            self.resolve_calls.append(wp)
+            return SimpleNamespace(
+                workspace_path="/tmp/ws", prompt_path="/tmp/p.md",
+                lane_branch=None, lane_id=None, lane_base_ref=None,
+            )
+
+        def append_history(self, mission, wp, message):
+            self.append_history_calls.append((wp, message))
+
+    host = InReviewHost()
+    captured: dict = {}
+
+    async def fake_execute_and_advance(wp_id, mission, ws, pp, agent, h, rs, ac, cfg, conc, **kwargs):
+        captured["current_lane"] = kwargs.get("current_lane")
+        h.lanes[wp_id] = "done"
+
+    monkeypatch.setattr(loop_mod, "execute_and_advance", fake_execute_and_advance)
+
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    async def run():
+        await asyncio.wait_for(
+            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+        )
+
+    asyncio.run(run())  # must not raise DeadlockError
+
+    # Recovery: in_review was force-transitioned back to for_review
+    assert any(
+        wp == "WP01" and to == "for_review" and force
+        for wp, to, force in host.transition_calls
+    ), f"expected forced in_review->for_review recovery, got {host.transition_calls}"
+    # Then treated as a for_review orphan (resolved read-only, not start-implementation)
+    assert host.resolve_calls == ["WP01"], "recovered WP resolved read-only"
+    assert host.start_impl_calls == [], "must not start-implementation a recovered in_review WP"
+    assert captured["current_lane"] == "for_review"
+    assert host.lanes["WP01"] == "done"
 
 
 def test_already_claimed_wp_quarantines_no_infinite_loop(tmp_path, monkeypatch) -> None:
