@@ -33,21 +33,27 @@ installed or a mission on disk.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
+from spec_kitty_orchestrator.cli import main as cli_main
 from spec_kitty_orchestrator.cli.main import app
 from spec_kitty_orchestrator.host.models import ContractVersionData
+from spec_kitty_orchestrator.state import new_run_state, save_state
 
 
 def _init_repo(root: Path) -> None:
     """Create a minimal committed git repo with a .kittify dir."""
     (root / ".kittify").mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=root, check=True
+    )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
     (root / "README.md").write_text("seed\n", encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
@@ -75,8 +81,10 @@ def test_orchestrate_does_not_create_orchestrator_worktree(tmp_path: Path) -> No
             app,
             [
                 "orchestrate",
-                "--mission", "099-test",
-                "--repo-root", str(tmp_path),
+                "--mission",
+                "099-test",
+                "--repo-root",
+                str(tmp_path),
                 "--dry-run",
             ],
         )
@@ -88,3 +96,90 @@ def test_orchestrate_does_not_create_orchestrator_worktree(tmp_path: Path) -> No
         "orchestrate created an orchestrator worktree; host mutations must run "
         "from the primary checkout, never from a worktree"
     )
+
+
+def _sleep_context_spy():
+    """Return a context/loop pair that proves the loop runs inside the context."""
+    calls: list[bool] = []
+    active = False
+
+    @contextmanager
+    def fake_prevent_idle_sleep(enabled: bool = True):
+        nonlocal active
+        calls.append(enabled)
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    async def fake_loop(*_args, **_kwargs) -> None:
+        assert active, "orchestration loop ran outside the idle-sleep context"
+
+    return calls, fake_prevent_idle_sleep, fake_loop
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_enabled"),
+    [([], True), (["--no-caffeinate"], False)],
+)
+def test_orchestrate_wraps_loop_in_sleep_context(
+    tmp_path: Path,
+    extra_args: list[str],
+    expected_enabled: bool,
+) -> None:
+    _init_repo(tmp_path)
+    calls, fake_context, fake_loop = _sleep_context_spy()
+    fake_version = ContractVersionData(
+        api_version="1.3.0", min_supported_provider_version="0.1.0"
+    )
+
+    with (
+        patch(
+            "spec_kitty_orchestrator.cli.main.HostClient.contract_version",
+            return_value=fake_version,
+        ),
+        patch("spec_kitty_orchestrator.cli.main.prevent_idle_sleep", fake_context),
+        patch("spec_kitty_orchestrator.cli.main.run_orchestration_loop", fake_loop),
+    ):
+        result = CliRunner().invoke(
+            app,
+            [
+                "orchestrate",
+                "--mission",
+                "099-test",
+                "--repo-root",
+                str(tmp_path),
+                *extra_args,
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [expected_enabled]
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_enabled"),
+    [([], True), (["--no-caffeinate"], False)],
+)
+def test_resume_wraps_loop_in_sleep_context(
+    tmp_path: Path,
+    extra_args: list[str],
+    expected_enabled: bool,
+) -> None:
+    _init_repo(tmp_path)
+    state_file = tmp_path / ".kittify" / "orchestrator-run-state.json"
+    save_state(new_run_state("099-test", cli_main._DEFAULT_POLICY), state_file)
+    calls, fake_context, fake_loop = _sleep_context_spy()
+
+    with (
+        patch("spec_kitty_orchestrator.cli.main.prevent_idle_sleep", fake_context),
+        patch("spec_kitty_orchestrator.cli.main.run_orchestration_loop", fake_loop),
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["resume", "--repo-root", str(tmp_path), *extra_args],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [expected_enabled]

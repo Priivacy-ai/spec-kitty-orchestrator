@@ -82,11 +82,13 @@ spec-kitty-orchestrator orchestrate  --mission <slug>
                                      [--actor <identity>]
                                      [--repo-root <path>]
                                      [--dry-run]
+                                     [--no-caffeinate]
 
 spec-kitty-orchestrator status       [--repo-root <path>]
 
 spec-kitty-orchestrator resume       [--actor <identity>]
                                      [--repo-root <path>]
+                                     [--no-caffeinate]
 
 spec-kitty-orchestrator abort        [--cleanup-worktrees]
                                      [--repo-root <path>]
@@ -104,6 +106,10 @@ Starts a new orchestration run for the named mission. Runs until all WPs reach a
 | `--max-concurrent` | `4` | Max WPs in flight simultaneously |
 | `--actor` | `spec-kitty-orchestrator` | Actor identity recorded in events |
 | `--dry-run` | off | Validate config only, don't execute |
+| `--no-caffeinate` | off | Allow macOS idle sleep during the run |
+
+On macOS, `orchestrate` holds an idle-sleep assertion for the loop's lifetime by
+default. This does not prevent lid-close sleep. Use `--no-caffeinate` to opt out.
 
 ### `status`
 
@@ -111,7 +117,9 @@ Shows the provider-local run state (retry counts, agent choices, errors) from th
 
 ### `resume`
 
-Resumes an interrupted run from saved state. The host already tracks lane state, so the loop simply re-polls for ready WPs.
+Resumes an interrupted run from saved state. The host already tracks lane state,
+so the loop simply re-polls for ready WPs. On macOS, resumed runs also hold the
+idle-sleep assertion by default; use `--no-caffeinate` to opt out.
 
 ### `abort`
 
