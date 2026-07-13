@@ -31,8 +31,10 @@ def _ready(wp_id: str):
     return SimpleNamespace(wp_id=wp_id)
 
 
-def _state(wp_id: str, lane: str):
-    return SimpleNamespace(wp_id=wp_id, lane=lane, dependencies=[], last_actor=None)
+def _state(wp_id: str, lane: str, last_actor: str | None = None):
+    return SimpleNamespace(
+        wp_id=wp_id, lane=lane, dependencies=[], last_actor=last_actor
+    )
 
 
 # -- pure scheduling decision -------------------------------------------------
@@ -92,15 +94,19 @@ class _FakeHost:
     """Minimal HostClient stand-in. WP01 starts orphaned in_progress."""
 
     def __init__(self) -> None:
+        self.actor = "spec-kitty-orchestrator"
         self.lanes = {"WP01": "in_progress"}
         self.start_impl_calls: list[str] = []
+        self.last_actors: dict[str, str | None] = {"WP01": None}
 
     def list_ready(self, mission):  # in_progress WP is never "ready"
         return SimpleNamespace(ready_work_packages=[])
 
     def mission_state(self, mission):
         return SimpleNamespace(
-            work_packages=[_state(k, v) for k, v in self.lanes.items()]
+            work_packages=[
+                _state(k, v, self.last_actors.get(k)) for k, v in self.lanes.items()
+            ]
         )
 
     def start_implementation(self, mission, wp):
@@ -317,6 +323,7 @@ def test_loop_recovers_in_review_wp_on_restart(tmp_path, monkeypatch) -> None:
         def __init__(self) -> None:
             super().__init__()
             self.lanes = {"WP01": "in_review"}
+            self.last_actors = {"WP01": self.actor}
             self.transition_calls: list[tuple] = []
             self.resolve_calls: list[str] = []
             self.append_history_calls: list = []
@@ -349,7 +356,10 @@ def test_loop_recovers_in_review_wp_on_restart(tmp_path, monkeypatch) -> None:
 
     async def run():
         await asyncio.wait_for(
-            run_orchestration_loop("m", host, run_state, cfg), timeout=5.0
+            run_orchestration_loop(
+                "m", host, run_state, cfg, recover_in_review=True
+            ),
+            timeout=5.0,
         )
 
     asyncio.run(run())  # must not raise DeadlockError
@@ -364,6 +374,61 @@ def test_loop_recovers_in_review_wp_on_restart(tmp_path, monkeypatch) -> None:
     assert host.start_impl_calls == [], "must not start-implementation a recovered in_review WP"
     assert captured["current_lane"] == "for_review"
     assert host.lanes["WP01"] == "done"
+
+
+def test_loop_does_not_recover_review_owned_by_another_actor(
+    tmp_path, monkeypatch
+) -> None:
+    """A live/external review identity must never be force-rewound."""
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(loop_mod, "DEADLOCK_THRESHOLD", 2)
+
+    class ExternalReviewHost(_FakeHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lanes = {"WP01": "in_review"}
+            self.last_actors = {"WP01": "human-reviewer"}
+            self.transition_calls: list[tuple] = []
+
+        def transition(self, mission, wp, to, **kwargs):
+            self.transition_calls.append((wp, to, kwargs))
+
+    host = ExternalReviewHost()
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    with pytest.raises(DeadlockError):
+        asyncio.run(
+            run_orchestration_loop(
+                "m", host, run_state, cfg, recover_in_review=True
+            )
+        )
+
+    assert host.transition_calls == []
+
+
+def test_recovery_failure_surfaces_original_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(loop_mod, "LOOP_POLL_INTERVAL", 0.001)
+
+    class FailingRecoveryHost(_FakeHost):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lanes = {"WP01": "in_review"}
+            self.last_actors = {"WP01": self.actor}
+
+        def transition(self, mission, wp, to, **kwargs):
+            raise RuntimeError("host recovery rejected")
+
+    host = FailingRecoveryHost()
+    cfg = _cfg(tmp_path)
+    run_state = new_run_state("m", _policy())
+
+    with pytest.raises(loop_mod.OrchestrationError, match="host recovery rejected"):
+        asyncio.run(
+            run_orchestration_loop(
+                "m", host, run_state, cfg, recover_in_review=True
+            )
+        )
 
 
 def test_already_claimed_wp_quarantines_no_infinite_loop(tmp_path, monkeypatch) -> None:

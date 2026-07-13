@@ -10,9 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,7 +23,8 @@ from ..host.client import HostClient, ContractMismatchError
 from ..loop import OrchestrationError, run_orchestration_loop
 from ..policy import PolicyMetadata
 from ..power import prevent_idle_sleep
-from ..state import load_state, new_run_state, save_state
+from ..run_lock import OrchestrationAlreadyRunningError, orchestration_lock
+from ..state import RunState, load_state, new_run_state, save_state
 
 app = typer.Typer(
     name="spec-kitty-orchestrator",
@@ -88,6 +87,7 @@ def orchestrate(
     cfg = load_config(root, actor, **cfg_overrides)
 
     policy = _DEFAULT_POLICY
+    run_state: RunState | None = None
     try:
         policy.validate()
     except ValueError as exc:
@@ -122,26 +122,35 @@ def orchestrate(
         console.print(f"  Review agents: {cfg.agent_selection.review_agents}")
         return
 
-    run_state = new_run_state(mission, policy)
-    save_state(run_state, cfg.state_file)
-
-    console.print(f"[bold green]Starting orchestration[/bold green] for mission [cyan]{mission}[/cyan]")
-    console.print(f"  Run ID: {run_state.run_id}")
-    console.print(f"  Impl agents: {cfg.agent_selection.implementation_agents}")
-    console.print(f"  Max concurrent: {cfg.max_concurrent_wps}")
-
     try:
-        # Long-lived run: hold an idle-sleep assertion so a laptop doesn't
-        # kill the loop and its agent subprocesses mid-mission (#2500).
-        with prevent_idle_sleep(enabled=not no_caffeinate):
-            asyncio.run(run_orchestration_loop(mission, host, run_state, cfg))
+        with orchestration_lock(root / ".kittify" / "orchestrator.lock", mission):
+            run_state = new_run_state(mission, policy)
+            save_state(run_state, cfg.state_file)
+
+            console.print(f"[bold green]Starting orchestration[/bold green] for mission [cyan]{mission}[/cyan]")
+            console.print(f"  Run ID: {run_state.run_id}")
+            console.print(f"  Impl agents: {cfg.agent_selection.implementation_agents}")
+            console.print(f"  Max concurrent: {cfg.max_concurrent_wps}")
+
+            # Long-lived run: hold an idle-sleep assertion so a laptop doesn't
+            # kill the loop and its agent subprocesses mid-mission (#2500).
+            with prevent_idle_sleep(enabled=not no_caffeinate):
+                asyncio.run(
+                    run_orchestration_loop(
+                        mission, host, run_state, cfg, recover_in_review=True
+                    )
+                )
         console.print("[bold green]Orchestration completed successfully.[/bold green]")
+    except OrchestrationAlreadyRunningError as exc:
+        console.print(f"[red]Orchestration refused:[/red] {exc}")
+        raise typer.Exit(1)
     except OrchestrationError as exc:
         console.print(f"[red]Orchestration error:[/red] {exc}")
         raise typer.Exit(1)
     except KeyboardInterrupt:
         console.print("[yellow]Interrupted by user.[/yellow]")
-        save_state(run_state, cfg.state_file)
+        if run_state is not None:
+            save_state(run_state, cfg.state_file)
         raise typer.Exit(130)
 
 
@@ -203,10 +212,24 @@ def resume(
     host = HostClient(root, actor, policy_json=policy.to_json())
 
     try:
-        # Resumed runs are just as long-lived as fresh ones (#2500).
-        with prevent_idle_sleep(enabled=not no_caffeinate):
-            asyncio.run(run_orchestration_loop(run_state.mission_slug, host, run_state, cfg))
+        with orchestration_lock(
+            root / ".kittify" / "orchestrator.lock", run_state.mission_slug
+        ):
+            # Resumed runs are just as long-lived as fresh ones (#2500).
+            with prevent_idle_sleep(enabled=not no_caffeinate):
+                asyncio.run(
+                    run_orchestration_loop(
+                        run_state.mission_slug,
+                        host,
+                        run_state,
+                        cfg,
+                        recover_in_review=True,
+                    )
+                )
         console.print("[bold green]Resumed orchestration completed.[/bold green]")
+    except OrchestrationAlreadyRunningError as exc:
+        console.print(f"[red]Resume refused:[/red] {exc}")
+        raise typer.Exit(1)
     except OrchestrationError as exc:
         console.print(f"[red]Orchestration error:[/red] {exc}")
         raise typer.Exit(1)

@@ -19,7 +19,6 @@ from spec_kitty_orchestrator.host.client import (
     ContractMismatchError,
     MissionNotFoundError,
     HostClient,
-    HostError,
     TransitionRejectedError,
     PolicyValidationError,
 )
@@ -152,12 +151,6 @@ class TestContractVersion:
 
     def test_mismatch_raises_contract_mismatch_error(self) -> None:
         client = _make_client()
-        fixture = _load_fixture("error_contract_mismatch")
-
-        from spec_kitty_orchestrator.host.models import HostResponse
-
-        mock_response = HostResponse(**fixture)
-        mock_response_failing = MagicMock()
 
         with patch.object(client, "_call", side_effect=ContractMismatchError(
             "CONTRACT_VERSION_MISMATCH",
@@ -427,6 +420,31 @@ class TestTransition:
         args = call.call_args.args[0]
         assert args[args.index("--review-result-json") + 1] == '{"reviewer":"codex"}'
         assert args[args.index("--evidence-json") + 1] == '{"review":{}}'
+
+    def test_sends_attributed_forced_review_recovery(self) -> None:
+        client = _make_client()
+        fixture = _load_fixture("transition_success")
+
+        from spec_kitty_orchestrator.host.models import HostResponse
+
+        with patch.object(
+            client,
+            "_call",
+            return_value=HostResponse(**fixture),
+        ) as call:
+            client.transition(
+                "099-test-feature",
+                "WP01",
+                "for_review",
+                force=True,
+                note="reviewer interrupted; re-queuing",
+            )
+
+        args = call.call_args.args[0]
+        assert "--force" in args
+        assert args[args.index("--actor") + 1] == "test-orchestrator"
+        assert args[args.index("--note") + 1] == "reviewer interrupted; re-queuing"
+        assert "--policy" in args
 
 
 # -- append-history ------------------------------------------------------------
