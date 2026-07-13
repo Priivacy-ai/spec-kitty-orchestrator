@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 from spec_kitty_orchestrator.loop import (
-    _ensure_subtasks_marked,
     _extract_subtask_ids,
     _inject_subtask_tracking,
 )
+
+
+def _prompt(frontmatter: str, body: str = "Body") -> str:
+    return f"---\n{frontmatter}\n---\n\n{body}"
 
 
 # ---------------------------------------------------------------------------
@@ -19,36 +18,50 @@ from spec_kitty_orchestrator.loop import (
 
 class TestExtractSubtaskIds:
     def test_standard_frontmatter(self) -> None:
-        prompt = "---\nwp_id: WP01\nsubtasks:\n- T001\n- T002\n- T003\n---\n\nBody"
+        prompt = _prompt("wp_id: WP01\nsubtasks:\n- T001\n- T002\n- T003")
         assert _extract_subtask_ids(prompt) == ["T001", "T002", "T003"]
 
     def test_indented_items(self) -> None:
-        prompt = "subtasks:\n  - T001\n  - T002\n"
+        prompt = _prompt("subtasks:\n  - T001\n  - T002")
+        assert _extract_subtask_ids(prompt) == ["T001", "T002"]
+
+    def test_canonical_quoted_items_are_normalized(self) -> None:
+        prompt = _prompt('subtasks:\n  - "T001"\n  - "T002"')
+        assert _extract_subtask_ids(prompt) == ["T001", "T002"]
+
+    def test_inline_list_is_supported(self) -> None:
+        prompt = _prompt('subtasks: ["T001", "T002"]')
+        assert _extract_subtask_ids(prompt) == ["T001", "T002"]
+
+    def test_legacy_unquoted_inline_list_is_supported(self) -> None:
+        prompt = _prompt("subtasks: [T001, T002]")
         assert _extract_subtask_ids(prompt) == ["T001", "T002"]
 
     def test_no_subtasks_block(self) -> None:
-        prompt = "wp_id: WP01\ntitle: no subtasks here\n"
+        prompt = _prompt("wp_id: WP01\ntitle: no subtasks here")
         assert _extract_subtask_ids(prompt) == []
 
     def test_empty_subtasks_block(self) -> None:
         # No items under the header — regex won't match the block
-        prompt = "subtasks:\n\nSome body text\n"
+        prompt = _prompt("subtasks:\n\ntitle: empty")
         assert _extract_subtask_ids(prompt) == []
 
     def test_single_subtask(self) -> None:
-        prompt = "subtasks:\n- T001\n\nBody starts here"
+        prompt = _prompt("subtasks:\n- T001")
         assert _extract_subtask_ids(prompt) == ["T001"]
 
     def test_alphanumeric_ids(self) -> None:
-        prompt = "subtasks:\n- TASK-1\n- TASK-2\n"
+        prompt = _prompt("subtasks:\n- TASK-1\n- TASK-2")
         assert _extract_subtask_ids(prompt) == ["TASK-1", "TASK-2"]
 
     def test_does_not_match_subtasks_in_body(self) -> None:
         # A ``subtasks:`` word in the body (not at line start) should not match
-        prompt = "title: foo\n\n## Notes\n\nsubtasks:\n- T001\n"
-        result = _extract_subtask_ids(prompt)
-        # May or may not match depending on position — we just assert no crash
-        assert isinstance(result, list)
+        prompt = _prompt("title: foo", "## Notes\n\nsubtasks:\n- T001")
+        assert _extract_subtask_ids(prompt) == []
+
+    def test_invalid_cli_token_is_rejected(self) -> None:
+        prompt = _prompt('subtasks:\n- "T001;touch-pwned"\n- T002')
+        assert _extract_subtask_ids(prompt) == ["T002"]
 
 
 # ---------------------------------------------------------------------------
@@ -81,48 +94,6 @@ class TestInjectSubtaskTracking:
         result = _inject_subtask_tracking("body", ["T001"], "m")
         assert "mark-status T001 --status done" in result
 
-
-# ---------------------------------------------------------------------------
-# _ensure_subtasks_marked
-# ---------------------------------------------------------------------------
-
-class TestEnsureSubtasksMarked:
-    def test_calls_spec_kitty_cli(self, tmp_path: Path) -> None:
-        with patch("spec_kitty_orchestrator.loop.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            _ensure_subtasks_marked(tmp_path, "my-mission", ["T001", "T002"])
-
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "spec-kitty"
-        assert "mark-status" in args
-        assert "T001" in args
-        assert "T002" in args
-        assert "--status" in args
-        assert "done" in args
-        assert "--mission" in args
-        assert "my-mission" in args
-
-    def test_no_subtasks_does_nothing(self, tmp_path: Path) -> None:
-        with patch("spec_kitty_orchestrator.loop.subprocess.run") as mock_run:
-            _ensure_subtasks_marked(tmp_path, "m", [])
-        mock_run.assert_not_called()
-
-    def test_cli_failure_is_warned_not_raised(self, tmp_path: Path) -> None:
-        with patch("spec_kitty_orchestrator.loop.subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(1, "spec-kitty", stderr="oops")
-            # Should not raise
-            _ensure_subtasks_marked(tmp_path, "m", ["T001"])
-
-    def test_missing_binary_is_warned_not_raised(self, tmp_path: Path) -> None:
-        with patch("spec_kitty_orchestrator.loop.subprocess.run") as mock_run:
-            mock_run.side_effect = FileNotFoundError("spec-kitty not found")
-            _ensure_subtasks_marked(tmp_path, "m", ["T001"])
-
-    def test_uses_workspace_as_cwd(self, tmp_path: Path) -> None:
-        with patch("spec_kitty_orchestrator.loop.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            _ensure_subtasks_marked(tmp_path, "m", ["T001"])
-
-        kwargs = mock_run.call_args[1]
-        assert kwargs["cwd"] == tmp_path
+    def test_mission_slug_is_shell_quoted(self) -> None:
+        result = _inject_subtask_tracking("body", ["T001"], "mission;echo unsafe")
+        assert "--mission 'mission;echo unsafe'" in result

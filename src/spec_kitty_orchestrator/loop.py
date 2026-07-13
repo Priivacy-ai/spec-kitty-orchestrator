@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import re
-import subprocess
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any
@@ -204,7 +204,6 @@ async def execute_and_advance(
                 save_state(run_state, cfg.state_file)
                 return
             impl_success = True
-            _ensure_subtasks_marked(workspace_path, mission, subtask_ids)
             host.append_history(
                 mission, wp_id,
                 f"Implementation committed and completed by '{impl_agent_id}'"
@@ -636,25 +635,57 @@ def _transition_review_rejected(
     )
 
 
-_SUBTASK_FRONTMATTER_RE = re.compile(
-    r"^subtasks:\s*\n((?:[ \t]*-[ \t]+\S+[ \t]*\n?)+)",
-    re.MULTILINE,
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(?P<body>.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
 )
+_SUBTASK_KEY_RE = re.compile(r"^subtasks:\s*(?P<inline>\[[^\n]*\])?\s*$")
+_SUBTASK_ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+
+
+def _normalize_subtask_id(value: str) -> str | None:
+    """Strip YAML scalar quotes and reject values unsafe for CLI guidance."""
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {'"', "'"}:
+        candidate = candidate[1:-1]
+    return candidate if _SUBTASK_ITEM_RE.fullmatch(candidate) else None
 
 
 def _extract_subtask_ids(prompt_text: str) -> list[str]:
-    """Return task IDs declared in the ``subtasks:`` frontmatter block."""
-    m = _SUBTASK_FRONTMATTER_RE.search(prompt_text)
-    if not m:
+    """Return normalized IDs from canonical block or inline YAML frontmatter."""
+    frontmatter_match = _FRONTMATTER_RE.match(prompt_text)
+    if not frontmatter_match:
         return []
-    return re.findall(r"-[ \t]+(\S+)", m.group(1))
+
+    lines = frontmatter_match.group("body").splitlines()
+    for index, line in enumerate(lines):
+        key_match = _SUBTASK_KEY_RE.fullmatch(line.strip())
+        if not key_match:
+            continue
+
+        inline = key_match.group("inline")
+        raw_values: list[str]
+        if inline is not None:
+            raw_values = inline[1:-1].split(",") if inline[1:-1].strip() else []
+        else:
+            raw_values = []
+            for item_line in lines[index + 1 :]:
+                item_match = re.fullmatch(r"[ \t]*-[ \t]+(.+?)[ \t]*", item_line)
+                if not item_match:
+                    break
+                raw_values.append(item_match.group(1))
+
+        normalized = [_normalize_subtask_id(value) for value in raw_values]
+        return [value for value in normalized if value is not None]
+    return []
 
 
 def _inject_subtask_tracking(prompt_text: str, subtask_ids: list[str], mission: str) -> str:
-    """Prepend per-subtask mark-status instructions to the prompt.
+    """Prepend best-effort per-subtask mark-status guidance to the prompt.
 
-    Instructs the agent to call ``mark-status <ID> --status done`` immediately
-    after completing each subtask rather than batching all at the end.
+    A cooperative agent calls ``mark-status`` after each completed subtask so
+    dashboard progress updates during its WP-level run. The orchestrator does
+    not mark anything itself: unchecked tasks remain genuine host-gate evidence.
     """
     if not subtask_ids:
         return prompt_text
@@ -667,8 +698,8 @@ def _inject_subtask_tracking(prompt_text: str, subtask_ids: list[str], mission: 
     ]
     for t_id in subtask_ids:
         lines.append(
-            f"    spec-kitty agent tasks mark-status {t_id}"
-            f" --status done --mission {mission}"
+            f"    spec-kitty agent tasks mark-status {shlex.quote(t_id)}"
+            f" --status done --mission {shlex.quote(mission)}"
         )
     lines += [
         "",
@@ -678,56 +709,6 @@ def _inject_subtask_tracking(prompt_text: str, subtask_ids: list[str], mission: 
         "",
     ]
     return "\n".join(lines) + prompt_text
-
-
-def _ensure_subtasks_marked(
-    workspace_path: Path,
-    mission: str,
-    subtask_ids: list[str],
-) -> None:
-    """Mark all subtask IDs done via the spec-kitty CLI (reliability fallback).
-
-    Called after a successful agent implementation to ensure checkbox rows in
-    ``tasks.md`` are ticked even when the agent skipped per-subtask marking.
-    Failures are logged as warnings rather than raised — the ``for_review``
-    guard will surface any still-unchecked rows.
-    """
-    if not subtask_ids:
-        return
-    try:
-        subprocess.run(
-            [
-                "spec-kitty",
-                "agent",
-                "tasks",
-                "mark-status",
-                *subtask_ids,
-                "--status",
-                "done",
-                "--auto-commit",
-                "--mission",
-                mission,
-            ],
-            cwd=workspace_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        logger.info(
-            "Marked %d subtask(s) done for mission %s: %s",
-            len(subtask_ids),
-            mission,
-            ", ".join(subtask_ids),
-        )
-    except subprocess.CalledProcessError as exc:
-        logger.warning(
-            "mark-status fallback failed for mission %s [%s]: %s",
-            mission,
-            ", ".join(subtask_ids),
-            exc.stderr.strip() if exc.stderr else str(exc),
-        )
-    except FileNotFoundError:
-        logger.warning("spec-kitty binary not found; skipping mark-status fallback")
 
 
 def _mark_failed(wp_exec: WPExecution, error: str) -> None:
