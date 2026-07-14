@@ -36,6 +36,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -119,6 +120,15 @@ def _sleep_context_spy():
     return calls, fake_prevent_idle_sleep, fake_loop
 
 
+def _mission_state(*lanes: str):
+    return SimpleNamespace(
+        work_packages=[
+            SimpleNamespace(wp_id=f"WP{index:02d}", lane=lane)
+            for index, lane in enumerate(lanes, start=1)
+        ]
+    )
+
+
 @pytest.mark.parametrize(
     ("extra_args", "expected_enabled"),
     [([], True), (["--no-caffeinate"], False)],
@@ -141,6 +151,10 @@ def test_orchestrate_wraps_loop_in_sleep_context(
         ),
         patch("spec_kitty_orchestrator.cli.main.prevent_idle_sleep", fake_context),
         patch("spec_kitty_orchestrator.cli.main.run_orchestration_loop", fake_loop),
+        patch(
+            "spec_kitty_orchestrator.cli.main.HostClient.mission_state",
+            return_value=_mission_state("done", "done"),
+        ),
     ):
         result = CliRunner().invoke(
             app,
@@ -156,6 +170,7 @@ def test_orchestrate_wraps_loop_in_sleep_context(
 
     assert result.exit_code == 0, result.output
     assert calls == [expected_enabled]
+    assert "spec-kitty merge --mission 099-test" in result.output
 
 
 @pytest.mark.parametrize(
@@ -175,6 +190,10 @@ def test_resume_wraps_loop_in_sleep_context(
     with (
         patch("spec_kitty_orchestrator.cli.main.prevent_idle_sleep", fake_context),
         patch("spec_kitty_orchestrator.cli.main.run_orchestration_loop", fake_loop),
+        patch(
+            "spec_kitty_orchestrator.cli.main.HostClient.mission_state",
+            return_value=_mission_state("done", "done"),
+        ),
     ):
         result = CliRunner().invoke(
             app,
@@ -183,3 +202,33 @@ def test_resume_wraps_loop_in_sleep_context(
 
     assert result.exit_code == 0, result.output
     assert calls == [expected_enabled]
+    assert "spec-kitty merge --mission 099-test" in result.output
+
+
+def test_orchestrate_does_not_offer_merge_for_blocked_wp(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    fake_version = ContractVersionData(
+        api_version="1.3.0", min_supported_provider_version="0.1.0"
+    )
+
+    with (
+        patch(
+            "spec_kitty_orchestrator.cli.main.HostClient.contract_version",
+            return_value=fake_version,
+        ),
+        patch("spec_kitty_orchestrator.cli.main.prevent_idle_sleep"),
+        patch("spec_kitty_orchestrator.cli.main.run_orchestration_loop"),
+        patch(
+            "spec_kitty_orchestrator.cli.main.HostClient.mission_state",
+            return_value=_mission_state("done", "blocked"),
+        ),
+    ):
+        result = CliRunner().invoke(
+            app,
+            ["orchestrate", "--mission", "099-test", "--repo-root", str(tmp_path)],
+        )
+
+    assert result.exit_code == 1
+    assert "without a merge-ready mission" in result.output
+    assert "WP02=blocked" in result.output
+    assert "spec-kitty merge" not in result.output

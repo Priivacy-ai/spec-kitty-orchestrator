@@ -60,6 +60,41 @@ def _find_repo_root() -> Path:
     return cwd
 
 
+def _print_completion_guidance(host: HostClient, mission: str) -> bool:
+    """Print truthful next steps and return whether every WP is merge-ready."""
+    try:
+        state = host.mission_state(mission)
+    except RuntimeError as exc:
+        console.print(
+            "[yellow]Orchestration ended, but final WP states could not be verified:[/yellow] "
+            f"{exc}"
+        )
+        console.print("Inspect mission status before merging lane branches.")
+        return False
+
+    lanes = {wp.wp_id: wp.lane for wp in state.work_packages}
+    if lanes and all(lane == "done" for lane in lanes.values()):
+        console.print("[bold green]Orchestration complete.[/bold green] All WPs are done.")
+        console.print("")
+        console.print(
+            "[bold]Next step:[/bold] lane branches are ready but NOT yet merged "
+            "into your target branch."
+        )
+        console.print(f"  Run: [cyan]spec-kitty merge --mission {mission}[/cyan]")
+        console.print("  Then open a PR from your target branch.")
+        return True
+
+    not_done = ", ".join(
+        f"{wp_id}={lane or 'unknown'}"
+        for wp_id, lane in sorted(lanes.items())
+        if lane != "done"
+    ) or "no work packages found"
+    console.print("[yellow]Orchestration stopped without a merge-ready mission.[/yellow]")
+    console.print(f"  WPs requiring attention: {not_done}")
+    console.print("  Resolve blocked/canceled WPs, then resume orchestration before merging.")
+    return False
+
+
 @app.command()
 def orchestrate(
     mission: str = typer.Option(..., "--mission", "-m", help="Mission slug to orchestrate"),
@@ -140,7 +175,8 @@ def orchestrate(
                         mission, host, run_state, cfg, recover_in_review=True
                     )
                 )
-        console.print("[bold green]Orchestration completed successfully.[/bold green]")
+            if not _print_completion_guidance(host, mission):
+                raise typer.Exit(1)
     except OrchestrationAlreadyRunningError as exc:
         console.print(f"[red]Orchestration refused:[/red] {exc}")
         raise typer.Exit(1)
@@ -226,7 +262,8 @@ def resume(
                         recover_in_review=True,
                     )
                 )
-        console.print("[bold green]Resumed orchestration completed.[/bold green]")
+            if not _print_completion_guidance(host, run_state.mission_slug):
+                raise typer.Exit(1)
     except OrchestrationAlreadyRunningError as exc:
         console.print(f"[red]Resume refused:[/red] {exc}")
         raise typer.Exit(1)
