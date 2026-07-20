@@ -111,6 +111,13 @@ Starts a new orchestration run for the named mission. Runs until all WPs reach a
 On macOS, `orchestrate` holds an idle-sleep assertion for the loop's lifetime by
 default. This does not prevent lid-close sleep. Use `--no-caffeinate` to opt out.
 
+**Scope:** this assertion is internal to this binary and only covers a run
+started via `orchestrate`/`resume`. If you are instead driving the
+implement-review loop from an agent-harness session (e.g. Claude Code
+following the `spec-kitty-implement-review` skill, without this binary), that
+session gets no sleep protection from spec-kitty-orchestrator — the skill
+carries its own guidance for that path.
+
 ### `status`
 
 Shows the provider-local run state (retry counts, agent choices, errors) from the most recent run.
